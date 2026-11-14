@@ -1,0 +1,98 @@
+.kael-login-layout {
+  --kael-login-pane-padding: var(--kael-gutter);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-block-size: 100dvh;
+  inline-size: 100%;
+  overflow-x: clip;
+}
+
+.kael-login-split-measure {
+  position: absolute;
+  inline-size: calc(var(--kael-login-form-inline-size) + var(--kael-login-pane-padding) * 2);
+  block-size: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.kael-login-brand {
+  display: none;
+}
+
+.kael-login-brand-copy {
+  max-inline-size: 36ch;
+  margin-block: auto;
+  padding-block: var(--kael-gutter);
+}
+
+.kael-login-display-heading {
+  font-size: clamp(2rem, 3vi, 2.75rem);
+  line-height: 1.16;
+}
+
+.kael-login-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-inline-size: 0;
+  min-block-size: 100dvh;
+  padding: var(--kael-login-pane-padding);
+}
+
+.kael-login-card {
+  flex-shrink: 0;
+  inline-size: 100%;
+  max-inline-size: var(--kael-login-form-inline-size);
+  margin: auto;
+}
+
+.kael-login-connection-anchor {
+  scroll-margin-block-end: var(--kael-overlay-gap);
+}
+
+.kael-login-dialog {
+  position: fixed;
+  inset-inline-end: auto;
+  inset-block-end: auto;
+  display: flex;
+  flex-direction: column;
+  inline-size: min(var(--kael-popover-inline-size), calc(100vi - var(--kael-gutter) * 2));
+  max-inline-size: calc(100vi - var(--kael-gutter) * 2);
+  max-block-size: calc(100dvh - var(--kael-gutter) * 2);
+  block-size: fit-content;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.kael-login-dialog:not([open]) {
+  display: none;
+}
+
+.kael-login-dialog::backdrop {
+  background: rgb(0 0 0 / 30%);
+}
+
+.kael-login-layout[data-split='true'] {
+  flex-direction: row;
+  block-size: 100dvh;
+  overflow: hidden;
+}
+
+.kael-login-layout[data-split='true'] .kael-login-brand {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: space-between;
+  min-inline-size: 0;
+  block-size: 100dvh;
+  padding: var(--kael-login-pane-padding);
+}
+
+.kael-login-layout[data-split='true'] .kael-login-main {
+  block-size: 100dvh;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}

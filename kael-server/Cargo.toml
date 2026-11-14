@@ -1,0 +1,26 @@
+[package]
+name = "kael-server"
+version = "1.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "kael-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+scrypt = "0.11"
+rpassword = "7"
+sha2 = "0.10"
+subtle = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+url = "2"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+http-body-util = "0.1"

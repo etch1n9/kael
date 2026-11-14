@@ -1,6 +1,0 @@
-{
-  "name": "KAEL — Sistem Informasi Manajemen Klinik & Rumah Sakit",
-  "description": "Klien desktop Linux berkinerja tinggi untuk operasional klinik dan rumah sakit multi-fasilitas: Pendaftaran, RME SOAP & Odontogram, Apotek FEFO, Laboratorium, Kasir, SATUSEHAT, BPJS, dan Manajemen Superuser.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
