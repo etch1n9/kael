@@ -67,6 +67,10 @@ pub fn default_facility_config(facility: &Value, published_by: &str) -> Value {
     config["effectiveDate"] = json!(date);
     config["publishedBy"] = json!(published_by);
     config["publishedAt"] = json!(created);
+    config["activeServices"] = json!([]);
+    config["units"] = json!([]);
+    config["guarantors"] = json!([]);
+    config["bedClasses"] = json!([]);
     if let Some(forms) = config["formSchemas"].as_array_mut() {
         for form in forms {
             form["effectiveDate"] = json!(date);
@@ -157,15 +161,15 @@ pub fn auto_triage(vitals: &Value) -> String {
     code.into()
 }
 
-pub fn invoice_totals(items: &[Value], guarantor: &str, discount: f64) -> Value {
+pub fn invoice_totals(items: &[Value], bpjs: bool, discount: f64) -> Value {
     let subtotal: f64 = items
         .iter()
         .map(|item| number(item, "quantity") * number(item, "unitPrice"))
         .sum();
     let discount = discount.min(subtotal).max(0.0);
     let net = subtotal - discount;
-    json!({"subtotal":subtotal,"discountAmount":discount,"bpjsCoveredAmount":0,"claimRequestedAmount":if guarantor == "BPJS_KESEHATAN" {net} else {0.0},
-        "patientPayableAmount":if guarantor == "BPJS_KESEHATAN" {0.0} else {net}})
+    json!({"subtotal":subtotal,"discountAmount":discount,"bpjsCoveredAmount":0,"claimRequestedAmount":if bpjs {net} else {0.0},
+        "patientPayableAmount":if bpjs {0.0} else {net}})
 }
 
 pub fn lab_templates() -> Vec<Value> {

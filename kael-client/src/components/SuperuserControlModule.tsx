@@ -30,7 +30,9 @@ import {
   SUB_CAPABILITY_CATALOG,
 } from '../domain/platformEngine.ts';
 import { DataExportToolbar } from './DataExportToolbar';
+import { FacilityMastersGate } from './FacilityMastersPanel';
 import { ExportColumn } from '../utils/exportDocument';
+import { visitUnits } from '../utils/facilityMasters';
 
 interface SuperuserControlModuleProps {
   token: string;
@@ -78,7 +80,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
   onRefreshWorkspace,
 }) => {
   const [subTab, setSubTab] = useState<
-    'USERS' | 'ROLES' | 'FACILITIES' | 'CAPABILITY_CONFIG' | 'SERVER_AUDIT'
+    'USERS' | 'ROLES' | 'FACILITIES' | 'MASTERS' | 'CAPABILITY_CONFIG' | 'SERVER_AUDIT'
   >('USERS');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null
@@ -135,7 +137,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<UserRole>('');
   const [specialization, setSpecialization] = useState('');
-  const [polyclinic, setPolyclinic] = useState('');
+  const [dutyUnits, setDutyUnits] = useState<string[]>([]);
   const [isPractitioner, setIsPractitioner] = useState(false);
   const [selectedFacilities, setSelectedFacilities] = useState<string[]>([]);
   const [isCreatingUser, setIsCreatingUser] = useState(false);
@@ -267,7 +269,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
         role,
         allowedFacilities: role === 'SUPERUSER' ? ['*'] : selectedFacilities,
         specialization,
-        polyclinic,
+        polyclinics: dutyUnits,
         isPractitioner,
       });
       setUsername('');
@@ -275,6 +277,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
       setFullName('');
       setNipOrSip('');
       setEmail('');
+      setDutyUnits([]);
       setIsPractitioner(false);
       await onRefreshWorkspace();
       setFeedback({
@@ -666,6 +669,13 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
       : workspace.allUsers
   ) as unknown as Record<string, unknown>[];
 
+  const dutyUnitChoices = (currentSnapshot
+    ? visitUnits(currentSnapshot)
+    : (workspace.facilityConfigHistory || [])
+        .filter((entry) => entry.lifecycleStage === 'ACTIVE')
+        .flatMap((entry) => visitUnits(entry))
+  ).filter((unit, index, list) => list.findIndex((item) => item.unitCode === unit.unitCode) === index);
+
   return (
     <div className="min-w-0 space-y-4">
       {deleteTarget && (
@@ -699,6 +709,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
           <select aria-label="Bagian administrasi" value={subTab} onChange={(event) => setSubTab(event.target.value as typeof subTab)} className="w-full rounded-xl border border-[#D5E3DF] bg-[#F3F8F6] px-3 py-2 text-sm dark:border-[#1E473F] dark:bg-[#081916]">
             <option value="USERS">Akun pengguna ({workspace.allUsers.length})</option>
             <option value="ROLES">Peran dan hak akses ({roles.length})</option>
+            <option value="MASTERS" disabled={!workspace.allFacilities.length}>Master unit & penjamin{workspace.allFacilities.length ? '' : ' (buat fasilitas dulu)'}</option>
             <option value="CAPABILITY_CONFIG" disabled={!currentSnapshot}>Layanan fasilitas{currentSnapshot ? '' : ' (pilih fasilitas)'}</option>
             <option value="FACILITIES">Fasilitas ({workspace.allFacilities.length})</option>
             <option value="SERVER_AUDIT">Server dan riwayat ({workspace.auditLogs.length})</option>
@@ -724,6 +735,19 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
           >
             <ShieldCheck className="w-3.5 h-3.5" />
             Peran dan hak akses ({roles.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('MASTERS')}
+            disabled={!workspace.allFacilities.length}
+            className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+              subTab === 'MASTERS'
+                ? 'bg-[#00897B] text-white'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+            }`}
+          >
+            <Building2 className="w-3.5 h-3.5" />
+            Master unit & penjamin
           </button>
           <button
             type="button"
@@ -971,9 +995,23 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">Spesialisasi (opsional)
                 <input value={specialization} onChange={(event) => setSpecialization(event.target.value)} placeholder="Bidang layanan atau profesi" className="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs" />
               </label>
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">Poliklinik (opsional)
-                <input value={polyclinic} onChange={(event) => setPolyclinic(event.target.value)} placeholder="Kode poliklinik" className="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs" />
-              </label>
+              <fieldset className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                <legend>Unit tugas (opsional)</legend>
+                <p className="mt-1 font-normal text-slate-500">Boleh dikosongkan. Centang setiap unit tempat akun ini bertugas.</p>
+                <div className="mt-2 space-y-1.5">
+                  {dutyUnitChoices.length === 0 && <p className="font-normal text-slate-500">Belum ada unit tujuan. Akun tetap bisa disimpan tanpa unit tugas.</p>}
+                  {dutyUnitChoices.map((unit) => (
+                    <label key={unit.unitCode} className="flex items-center gap-2 font-normal">
+                      <input
+                        type="checkbox"
+                        checked={dutyUnits.includes(unit.unitCode)}
+                        onChange={() => setDutyUnits((current) => current.includes(unit.unitCode) ? current.filter((code) => code !== unit.unitCode) : [...current, unit.unitCode])}
+                      />
+                      {unit.unitName}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
             </div>
 
             <div>
@@ -1525,6 +1563,15 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {subTab === 'MASTERS' && (
+        <FacilityMastersGate
+          token={token}
+          facilityCode={facilityCode}
+          workspace={workspace}
+          onSaved={onRefreshWorkspace}
+        />
       )}
 
       {/* SUB-TAB 3: MASTER FASILITAS KLINIK & RUMAH SAKIT */}

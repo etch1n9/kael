@@ -1014,6 +1014,7 @@ export default function App() {
                     key={visibleModule}
                     token={session.token}
                     activeFacility={effectiveFacility}
+                    activeFacilityConfig={activeConfig}
                     patients={workspace.patients}
                     visits={workspace.visits}
                     beds={workspace.beds}

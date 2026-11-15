@@ -1,7 +1,8 @@
 use crate::domain::{apply_clinical_record, auto_triage, invoice_totals, lab_flag, lab_templates};
 use crate::http::{
-    ApiError, ApiResult, App, RequestContext, array, array_mut, audit, bad_request, conflict,
-    forbidden, id, is_practitioner, json_response, not_found, now, require_service, save, text,
+    ApiError, ApiResult, App, RequestContext, active_config, array, array_mut, audit, bad_request,
+    conflict, forbidden, id, is_practitioner, json_response, not_found, now, require_service, save,
+    text,
 };
 use serde_json::{Value, json};
 
@@ -299,6 +300,19 @@ fn vitals(body: &Value) -> Result<Value, ApiError> {
     Ok(value.clone())
 }
 
+fn facility_snapshot(app: &App, ctx: &RequestContext) -> Value {
+    let facility = array(&app.db, "facilities")
+        .iter()
+        .find(|entry| text(entry, "code") == ctx.facility_code)
+        .cloned()
+        .unwrap_or_else(|| json!({"code": ctx.facility_code}));
+    active_config(&app.db, &facility)
+}
+
+fn visit_uses_bpjs(visit: &Value) -> bool {
+    text(visit, "guarantorSettlement") == "BPJS" || text(visit, "guarantor") == "BPJS_KESEHATAN"
+}
+
 fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool) -> ApiResult {
     let modules = if unified {
         vec!["PENDAFTARAN", "IGD_TRIASE_EWS"]
@@ -377,12 +391,30 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
         .filter(|visit| text(visit, "facilityCode") == ctx.facility_code)
         .count()
         + 1;
+    let config = facility_snapshot(app, ctx);
     let poli = text(body, "polyclinic");
-    let poli_prefix = match poli {
-        "IGD" => "IGD",
-        "POLI_GIGI" => "GIGI",
-        "POLI_ANAK" => "ANK",
-        _ => "PD",
+    let unit = array(&config, "units")
+        .iter()
+        .find(|unit| {
+            text(unit, "unitCode") == poli
+                && unit["active"] == true
+                && ["RUANG_PRAKTIK", "POLIKLINIK_SPESIALIS", "IGD"].contains(&text(unit, "unitType"))
+        })
+        .cloned()
+        .ok_or_else(|| {
+            bad_request(
+                "Unit tujuan belum dibuat superuser, nonaktif, atau bukan tujuan kunjungan.",
+            )
+        })?;
+    let poli_prefix: String = poli
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(4)
+        .collect();
+    let poli_prefix = if poli_prefix.is_empty() {
+        "REG".to_owned()
+    } else {
+        poli_prefix
     };
     let timestamp = now();
     let registration = format!(
@@ -391,14 +423,21 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
         timestamp[..10].replace('-', "")
     );
     let guarantor = text(body, "guarantor");
-    if !["UMUM", "BPJS_KESEHATAN", "ASURANSI_SWASTA", "KORPORASI"].contains(&guarantor) {
+    let payer = array(&config, "guarantors")
+        .iter()
+        .find(|entry| text(entry, "code") == guarantor && entry["active"] == true)
+        .cloned()
+        .ok_or_else(|| bad_request("Penjamin belum dibuat superuser atau sudah nonaktif."))?;
+    let settlement = text(&payer, "settlement");
+    if settlement != "BPJS" && settlement != "PATIENT" {
         return Err(bad_request("Jenis penjamin tidak valid."));
     }
     let doctor = doctor.unwrap_or(Value::Null);
-    let visit = json!({"id":id("vis"),"facilityCode":ctx.facility_code,"queueNumber":format!("{poli_prefix}-{sequence:03}"),"registrationNumber":registration,"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"nik":patient["nik"],"gender":patient["gender"],"birthDate":patient["birthDate"],"polyclinic":poli,"doctorId":text(&doctor,"id"),"doctorName":text(&doctor,"fullName"),"guarantor":guarantor,"bpjsSepOrPcareNo":if guarantor=="BPJS_KESEHATAN"{body["bpjsSepOrPcareNo"].clone()}else{Value::Null},"triageLevel":auto_triage(&vital_signs),"status":"MENUNGGU","vitals":vital_signs,"chiefComplaint":text(body,"chiefComplaint").trim(),"createdAt":timestamp,"updatedAt":timestamp});
+    let visit = json!({"id":id("vis"),"facilityCode":ctx.facility_code,"queueNumber":format!("{poli_prefix}-{sequence:03}"),"registrationNumber":registration,"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"nik":patient["nik"],"gender":patient["gender"],"birthDate":patient["birthDate"],"polyclinic":poli,"doctorId":text(&doctor,"id"),"doctorName":text(&doctor,"fullName"),"guarantor":guarantor,"guarantorSettlement":settlement,"bpjsSepOrPcareNo":if settlement=="BPJS"{body["bpjsSepOrPcareNo"].clone()}else{Value::Null},"triageLevel":auto_triage(&vital_signs),"status":"MENUNGGU","vitals":vital_signs,"chiefComplaint":text(body,"chiefComplaint").trim(),"createdAt":timestamp,"updatedAt":timestamp});
     array_mut(&mut app.db, "visits").insert(0, visit.clone());
-    if guarantor == "BPJS_KESEHATAN" {
-        array_mut(&mut app.db,"bridgingLogs").insert(0,json!({"id":id("brg"),"facilityCode":ctx.facility_code,"targetSystem":if poli=="IGD"{"BPJS_VCLAIM"}else{"BPJS_PCARE"},"resourceType":if poli=="IGD"{"Penerbitan SEP IGD V-Claim Otomatis"}else{"Pendaftaran Kunjungan Peserta P-Care"},"referenceId":visit["id"],"patientName":patient["fullName"],"status":"QUEUED_LOCAL","externalId":"","latencyMs":0,"payloadPreview":{"registrationNumber":registration,"noKartu":patient["bpjsNumber"],"polyclinic":poli,"keluhan":visit["chiefComplaint"],"triage":visit["triageLevel"]},"timestamp":timestamp}));
+    if settlement == "BPJS" {
+        let emergency = text(&unit, "unitType") == "IGD";
+        array_mut(&mut app.db,"bridgingLogs").insert(0,json!({"id":id("brg"),"facilityCode":ctx.facility_code,"targetSystem":if emergency{"BPJS_VCLAIM"}else{"BPJS_PCARE"},"resourceType":if emergency{"Penerbitan SEP IGD V-Claim Otomatis"}else{"Pendaftaran Kunjungan Peserta P-Care"},"referenceId":visit["id"],"patientName":patient["fullName"],"status":"QUEUED_LOCAL","externalId":"","latencyMs":0,"payloadPreview":{"registrationNumber":registration,"noKartu":patient["bpjsNumber"],"polyclinic":poli,"keluhan":visit["chiefComplaint"],"triage":visit["triageLevel"]},"timestamp":timestamp}));
     }
     audit(
         app,
@@ -489,7 +528,16 @@ fn create_bed(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     {
         return Err(bad_request("Tarif kamar tidak valid."));
     }
-    let bed = json!({"id":id("bed"),"facilityCode":ctx.facility_code,"wardName":text(body,"wardName").trim(),"roomNumber":default(body,"roomNumber",&code),"bedClass":text(body,"bedClass").trim(),"bedCode":code,"dailyRate":rate,"status":"TERSEDIA"});
+    let class_code = text(body, "bedClass").trim();
+    let class_known = array(&facility_snapshot(app, ctx), "bedClasses")
+        .iter()
+        .any(|entry| text(entry, "code") == class_code && entry["active"] == true);
+    if !class_known {
+        return Err(bad_request(
+            "Kelas kamar belum dibuat superuser atau sudah nonaktif.",
+        ));
+    }
+    let bed = json!({"id":id("bed"),"facilityCode":ctx.facility_code,"wardName":text(body,"wardName").trim(),"roomNumber":default(body,"roomNumber",&code),"bedClass":class_code,"bedCode":code,"dailyRate":rate,"status":"TERSEDIA"});
     array_mut(&mut app.db, "beds").push(bed.clone());
     audit(
         app,
@@ -1089,7 +1137,8 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             &parameter["tariff"],
         )?;
     }
-    let totals = invoice_totals(&items, text(&visit, "guarantor"), 0.0);
+    let bpjs = visit_uses_bpjs(&visit);
+    let totals = invoice_totals(&items, bpjs, 0.0);
     if !totals["subtotal"]
         .as_f64()
         .is_some_and(|subtotal| subtotal.is_finite())
@@ -1109,7 +1158,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                 array(&app.db, "invoices").len() + 1
             )
         });
-    let mut invoice = json!({"id":prior_invoice.as_ref().map(|row|row["id"].clone()).unwrap_or_else(||json!(id("inv"))),"facilityCode":ctx.facility_code,"invoiceNumber":invoice_number,"visitId":visit["id"],"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"guarantor":visit["guarantor"],"items":items,"unpricedItems":unpriced_items,"pricingStatus":if unpriced_items.is_empty(){"COMPLETE"}else{"PENDING"},"subtotal":totals["subtotal"],"discountAmount":totals["discountAmount"],"bpjsCoveredAmount":totals["bpjsCoveredAmount"],"patientPayableAmount":totals["patientPayableAmount"],"paymentMethod":Value::Null,"status":"BELUM_LUNAS","createdAt":prior_invoice.as_ref().map(|row|row["createdAt"].clone()).unwrap_or_else(||json!(timestamp))});
+    let mut invoice = json!({"id":prior_invoice.as_ref().map(|row|row["id"].clone()).unwrap_or_else(||json!(id("inv"))),"facilityCode":ctx.facility_code,"invoiceNumber":invoice_number,"visitId":visit["id"],"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"guarantor":visit["guarantor"],"guarantorSettlement":if bpjs {json!("BPJS")} else {json!("PATIENT")},"items":items,"unpricedItems":unpriced_items,"pricingStatus":if unpriced_items.is_empty(){"COMPLETE"}else{"PENDING"},"subtotal":totals["subtotal"],"discountAmount":totals["discountAmount"],"bpjsCoveredAmount":totals["bpjsCoveredAmount"],"patientPayableAmount":totals["patientPayableAmount"],"paymentMethod":Value::Null,"status":"BELUM_LUNAS","createdAt":prior_invoice.as_ref().map(|row|row["createdAt"].clone()).unwrap_or_else(||json!(timestamp))});
     if existing
         .as_ref()
         .is_some_and(|old| old["plan"] == record["plan"])
@@ -1121,7 +1170,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             invoice = previous.clone();
         }
     }
-    invoice["claimRequestedAmount"] = if text(&visit, "guarantor") == "BPJS_KESEHATAN" {
+    invoice["claimRequestedAmount"] = if bpjs {
         json!((n(&invoice, "subtotal") - n(&invoice, "discountAmount")).max(0.0))
     } else {
         json!(0)

@@ -14,6 +14,7 @@ import {
 import { DataExportToolbar } from './DataExportToolbar';
 import { KpiSparklineCanvas } from './KpiSparklineChart';
 import { ExportColumn } from '../utils/exportDocument';
+import { unitLabel, visitUnits } from '../utils/facilityMasters';
 
 interface DashboardModuleProps {
   workspace: WorkspacePayload;
@@ -58,12 +59,15 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
   const canReadFinance = workspace.dataAccess?.accountingEntries ?? hasAnyModule(['KASIR_AKUNTANSI', 'KEUANGAN_OWNER', 'NERACA_GL', 'KLAIM_BPJS_PIUTANG', 'JASA_MEDIS_REMUN']);
   const canReadPharmacy = workspace.dataAccess?.pharmacyOrders ?? hasAnyModule(['APOTEK', 'KATALOG_OPNAME', 'MUTASI_STOK', 'PENGADAAN_PBF', 'RME_DOKTER']);
   const canReadLaboratory = workspace.dataAccess?.labOrders ?? hasAnyModule(['LABORATORIUM', 'RME_DOKTER']);
-  const polyclinicOptions = useMemo(() => Array.from(new Set([
-    ...(activeFacility.polyclinics || []),
-    ...activeConfig.units.filter((unit) => unit.active && ['RUANG_PRAKTIK', 'POLIKLINIK_SPESIALIS', 'IGD'].includes(unit.unitType)).map((unit) => unit.unitCode),
-    ...visits.map((visit) => visit.polyclinic),
-    ...workspace.doctors.map((doctor) => doctor.polyclinic || ''),
-  ].filter(Boolean))).sort((left, right) => left.localeCompare(right)), [activeFacility.polyclinics, activeConfig.units, visits, workspace.doctors]);
+  const polyclinicOptions = useMemo(() => {
+    const units = visitUnits(activeConfig);
+    const known = new Set(units.map((unit) => unit.unitCode));
+    const extras = visits.map((visit) => visit.polyclinic).filter((code) => code && !known.has(code));
+    return [
+      ...units.map((unit) => ({ code: unit.unitCode, name: unit.unitName })),
+      ...Array.from(new Set(extras)).map((code) => ({ code, name: unitLabel(activeConfig.units, code) })),
+    ];
+  }, [activeConfig, visits]);
 
   const activeQueueCount = todaysVisits.filter(
     (v) => v.status !== 'SELESAI' && v.status !== 'BATAL'
@@ -243,9 +247,9 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                 onChange={(e) => setPoliFilter(e.target.value)}
                 className="min-w-0 w-full px-3 py-2 text-xs rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
               >
-                <option value="ALL">Semua Unit / Poli</option>
+                <option value="ALL">Semua unit tujuan</option>
                 {polyclinicOptions.map((poly) => (
-                  <option key={poly} value={poly}>{poly.replace(/_/g, ' ')}</option>
+                  <option key={poly.code} value={poly.code}>{poly.name}</option>
                 ))}
               </select>
             </div>
@@ -309,7 +313,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                     </td>
                     <td className="py-2.5 px-3">
                       <div className="font-medium text-[#0F2922] dark:text-white">
-                        {visit.polyclinic.replace(/_/g, ' ')}
+                        {unitLabel(activeConfig.units, visit.polyclinic)}
                       </div>
                       <div className="text-caption text-[#52736B] whitespace-normal">
                         {visit.doctorName}

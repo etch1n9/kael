@@ -707,7 +707,7 @@ export const kaelApi = {
       allowedFacilities: string[];
       customPrivileges?: ModuleKey[];
       specialization?: string;
-      polyclinic?: string;
+      polyclinics?: string[];
       isPractitioner?: boolean;
     }
   ) =>

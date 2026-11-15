@@ -12,12 +12,12 @@ fn number(value: &Value, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn uses_bpjs(value: &Value) -> bool {
+    text(value, "guarantorSettlement") == "BPJS" || text(value, "guarantor") == "BPJS_KESEHATAN"
+}
+
 fn recalculate(invoice: &mut Value, discount: f64) {
-    let totals = invoice_totals(
-        array(invoice, "items"),
-        text(invoice, "guarantor"),
-        discount,
-    );
+    let totals = invoice_totals(array(invoice, "items"), uses_bpjs(invoice), discount);
     for key in [
         "subtotal",
         "discountAmount",
@@ -146,7 +146,7 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
     {
         return Err(bad_request("Metode pembayaran tidak valid."));
     }
-    if payment == "KLAIM_BPJS" && text(&invoice, "guarantor") != "BPJS_KESEHATAN" {
+    if payment == "KLAIM_BPJS" && !uses_bpjs(&invoice) {
         return Err(bad_request(
             "Metode klaim BPJS hanya berlaku untuk tagihan dengan penjamin BPJS Kesehatan.",
         ));

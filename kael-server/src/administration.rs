@@ -83,6 +83,7 @@ pub fn handle(
                 return Err(bad_request("Daftar kapabilitas tidak valid."));
             }
             validate_capabilities(&capabilities).map_err(bad_request)?;
+            validate_masters(body)?;
             let mut source = current;
             if let (Some(source), Some(incoming)) = (source.as_object_mut(), body.as_object()) {
                 for (key, value) in incoming {
@@ -175,4 +176,99 @@ fn server_config(app: &mut App, context: &RequestContext, body: &Value) -> ApiRe
     );
     save(app)?;
     json_response(200, config)
+}
+
+fn master_code(value: &Value, key: &str) -> Result<String, crate::http::ApiError> {
+    let code = text(value, key).trim();
+    if code.is_empty()
+        || code.chars().count() > 40
+        || !code
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err(bad_request(
+            "Kode master harus 1–40 karakter: huruf, angka, atau garis bawah.",
+        ));
+    }
+    Ok(code.to_owned())
+}
+
+fn unique_codes(codes: &[String]) -> Result<(), crate::http::ApiError> {
+    let mut seen = Vec::new();
+    for code in codes {
+        if seen.iter().any(|existing: &String| existing == code) {
+            return Err(bad_request("Kode master tidak boleh ganda."));
+        }
+        seen.push(code.clone());
+    }
+    Ok(())
+}
+
+fn validate_masters(body: &Value) -> Result<(), crate::http::ApiError> {
+    if let Some(units) = body.get("units") {
+        let units = units
+            .as_array()
+            .ok_or_else(|| bad_request("Daftar unit tidak valid."))?;
+        let mut codes = Vec::new();
+        for unit in units {
+            let code = master_code(unit, "unitCode")?;
+            if text(unit, "unitName").trim().is_empty()
+                || text(unit, "unitName").chars().count() > 120
+                || ![
+                    "RUANG_PRAKTIK",
+                    "POLIKLINIK_SPESIALIS",
+                    "IGD",
+                    "BANGSAL_RANAP",
+                    "KAMAR_OPERASI",
+                    "HEMODIALISIS",
+                    "LABORATORIUM",
+                    "RADIOLOGI",
+                    "DEPO_FARMASI",
+                    "INSTALASI_PENDUKUNG",
+                ]
+                .contains(&text(unit, "unitType"))
+                || !unit.get("active").is_some_and(Value::is_boolean)
+            {
+                return Err(bad_request("Data unit atau poliklinik tidak lengkap."));
+            }
+            codes.push(code);
+        }
+        unique_codes(&codes)?;
+    }
+    if let Some(payers) = body.get("guarantors") {
+        let payers = payers
+            .as_array()
+            .ok_or_else(|| bad_request("Daftar penjamin tidak valid."))?;
+        let mut codes = Vec::new();
+        for payer in payers {
+            let code = master_code(payer, "code")?;
+            if text(payer, "name").trim().is_empty()
+                || text(payer, "name").chars().count() > 120
+                || !["PATIENT", "BPJS"].contains(&text(payer, "settlement"))
+                || !payer.get("active").is_some_and(Value::is_boolean)
+            {
+                return Err(bad_request("Data penjamin tidak lengkap."));
+            }
+            codes.push(code);
+        }
+        unique_codes(&codes)?;
+    }
+    if let Some(classes) = body.get("bedClasses") {
+        let classes = classes
+            .as_array()
+            .ok_or_else(|| bad_request("Daftar kelas kamar tidak valid."))?;
+        let mut codes = Vec::new();
+        for class in classes {
+            let code = master_code(class, "code")?;
+            if text(class, "name").trim().is_empty()
+                || text(class, "name").chars().count() > 120
+                || !class.get("active").is_some_and(Value::is_boolean)
+            {
+                return Err(bad_request("Data kelas kamar tidak lengkap."));
+            }
+            codes.push(code);
+        }
+        unique_codes(&codes)?;
+    }
+    Ok(())
 }

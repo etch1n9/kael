@@ -303,6 +303,39 @@ fn password_hash(value: &Value) -> Result<String, ApiError> {
     hash_password(password).map_err(|_| error(500, "Kata sandi tidak dapat diproses."))
 }
 
+fn assigned_units(body: &Value) -> Result<Vec<String>, ApiError> {
+    let Some(list) = body.get("polyclinics") else {
+        let single = text(body, "polyclinic").trim();
+        return Ok(if single.is_empty() {
+            Vec::new()
+        } else {
+            vec![single.to_owned()]
+        });
+    };
+    let list = list
+        .as_array()
+        .ok_or_else(|| bad_request("Daftar unit tugas tidak valid."))?;
+    let mut codes = Vec::new();
+    for item in list {
+        let code = item
+            .as_str()
+            .ok_or_else(|| bad_request("Daftar unit tugas tidak valid."))?
+            .trim();
+        if code.is_empty() || code.chars().count() > 40 {
+            return Err(bad_request("Kode unit tugas tidak valid."));
+        }
+        if !codes.iter().any(|existing| existing == code) {
+            codes.push(code.to_owned());
+        }
+    }
+    Ok(codes)
+}
+
+fn write_assigned_units(user: &mut Value, codes: Vec<String>) {
+    user["polyclinics"] = json!(codes);
+    user["polyclinic"] = json!(codes.first().cloned().unwrap_or_default());
+}
+
 fn create_user(app: &mut App, context: &RequestContext, body: &Value) -> ApiResult {
     if body
         .get("isPractitioner")
@@ -349,10 +382,12 @@ fn create_user(app: &mut App, context: &RequestContext, body: &Value) -> ApiResu
         vec![json!(context.facility_code)]
     };
     let facilities = facilities_for(app, body.get("allowedFacilities"), role, &fallback)?;
-    let user = json!({"id":id("usr"),"username":username,"fullName":name,"nipOrSip":nip,"email":text(body,"email").trim(),
+    let units = assigned_units(body)?;
+    let mut user = json!({"id":id("usr"),"username":username,"fullName":name,"nipOrSip":nip,"email":text(body,"email").trim(),
         "role":role,"allowedFacilities":facilities,"customPrivileges":[],"specialization":text(body,"specialization").trim(),
-        "polyclinic":text(body,"polyclinic").trim(),"isPractitioner":body["isPractitioner"] == true,"active":true,"createdBy":text(&context.user,"username"),
+        "isPractitioner":body["isPractitioner"] == true,"active":true,"createdBy":text(&context.user,"username"),
         "createdAt":now(),"passwordHash":password_hash(&body["password"])?});
+    write_assigned_units(&mut user, units);
     array_mut(&mut app.db, "users").push(user.clone());
     audit(
         app,
@@ -432,6 +467,9 @@ fn update_user(app: &mut App, context: &RequestContext, user_id: &str, body: &Va
                 value.trim().to_owned()
             });
         }
+    }
+    if body.get("polyclinics").is_some() || body.get("polyclinic").is_some() {
+        write_assigned_units(&mut user, assigned_units(body)?);
     }
     let username = text(&user, "username").to_owned();
     let role = text(&user, "role").to_owned();

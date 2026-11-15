@@ -19,6 +19,7 @@ import {
   Facility,
   InpatientBed,
   Patient,
+  SuperuserFacilityConfigSnapshot,
   UserAccount,
   VisitQueueItem,
   VitalSigns,
@@ -34,12 +35,14 @@ import {
 import { DataExportToolbar } from './DataExportToolbar';
 import { ModalDialog } from './ModalDialog';
 import { blankVitals, hasCompleteVitals } from '../utils/vitalSigns';
+import { activeBedClasses, activeGuarantors, unitLabel, visitUnits } from '../utils/facilityMasters';
 import { VitalSignsFields } from './VitalSignsFields';
 import { ExportColumn } from '../utils/exportDocument';
 
 interface RegistrationAndBedsModuleProps {
   token: string;
   activeFacility: Facility;
+  activeFacilityConfig?: SuperuserFacilityConfigSnapshot;
   patients: Patient[];
   visits: VisitQueueItem[];
   beds: InpatientBed[];
@@ -53,6 +56,7 @@ interface RegistrationAndBedsModuleProps {
 export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps> = ({
   token,
   activeFacility,
+  activeFacilityConfig,
   patients,
   visits,
   beds,
@@ -66,7 +70,12 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
   useEffect(() => {
     if (!allowedSubTabs.includes(subTab) && allowedSubTabs[0]) setSubTab(allowedSubTabs[0]);
   }, [subTab, allowedSubTabs.join(',')]);
-  const availablePolyclinics = useMemo(() => Array.from(new Set([...(activeFacility.polyclinics || []), ...doctors.map((doctor) => doctor.polyclinic || ''), ...visits.map((visit) => visit.polyclinic)])).filter(Boolean), [activeFacility.polyclinics, doctors, visits]);
+  const availablePolyclinics = useMemo(
+    () => visitUnits(activeFacilityConfig),
+    [activeFacilityConfig],
+  );
+  const guarantorChoices = useMemo(() => activeGuarantors(activeFacilityConfig), [activeFacilityConfig]);
+  const bedClassChoices = useMemo(() => activeBedClasses(activeFacilityConfig), [activeFacilityConfig]);
   const [showRegistrationForm, setShowRegistrationForm] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -1116,7 +1125,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
               {/* STEP 2: TUJUAN POLIKLINIK & PENJAMIN */}
               <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-3">
                 <div className="text-xs font-bold text-emerald-800 dark:text-emerald-400">
-                  Langkah 2 — Unit Poliklinik, Dokter &amp; Keluhan Kunjungan
+                  Langkah 2 — Unit Tujuan, Dokter dan Keluhan Kunjungan
                 </div>
 
                 <div className="grid min-w-0 [&>*]:min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-field-min-inline-size)),1fr))] gap-3">
@@ -1125,7 +1134,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                       htmlFor="visit-polyclinic-select"
                       className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1"
                     >
-                      Unit / Poliklinik Tujuan
+                      Unit Tujuan
                     </label>
                     <select
                       id="visit-polyclinic-select"
@@ -1135,8 +1144,9 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                       className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
                     >
                       <option value="" disabled>Pilih unit layanan</option>
-                      {availablePolyclinics.map((code) => <option key={code} value={code}>{code.replace(/_/g, ' ')}</option>)}
+                      {availablePolyclinics.map((unit) => <option key={unit.unitCode} value={unit.unitCode}>{unit.unitName}</option>)}
                     </select>
+                    {availablePolyclinics.length === 0 && <p className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">Belum ada unit. Superuser harus menambahkannya di Master unit & penjamin.</p>}
                   </div>
 
                   <div>
@@ -1179,11 +1189,9 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                       className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
                     >
                       <option value="">Pilih penjamin</option>
-                      <option value="BPJS_KESEHATAN">BPJS Kesehatan</option>
-                      <option value="UMUM">Pasien Umum / Mandiri</option>
-                      <option value="ASURANSI_SWASTA">Asuransi Swasta Rekanan</option>
-                      <option value="KORPORASI">Jaminan Perusahaan / Korporasi</option>
+                      {guarantorChoices.map((entry) => <option key={entry.code} value={entry.code}>{entry.name}</option>)}
                     </select>
+                    {guarantorChoices.length === 0 && <p className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">Belum ada penjamin. Superuser harus menambahkannya di Master unit & penjamin.</p>}
                   </div>
 
                   <div>
@@ -1433,7 +1441,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                       className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
                     >
                       <option value="ALL">Semua Unit / Poli</option>
-                      {availablePolyclinics.map((code) => <option key={code} value={code}>{code.replace(/_/g, ' ')}</option>)}
+                      {availablePolyclinics.map((unit) => <option key={unit.unitCode} value={unit.unitCode}>{unit.unitName}</option>)}
                     </select>
                   </div>
 
@@ -1445,10 +1453,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                       className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
                     >
                       <option value="ALL">Semua Penjamin</option>
-                      <option value="BPJS_KESEHATAN">BPJS Kesehatan</option>
-                      <option value="UMUM">Pasien Umum</option>
-                      <option value="ASURANSI_SWASTA">Asuransi Swasta</option>
-                      <option value="KORPORASI">Korporasi</option>
+                      {guarantorChoices.map((entry) => <option key={entry.code} value={entry.code}>{entry.name}</option>)}
                     </select>
                   </div>
 
@@ -1512,7 +1517,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                           </td>
                           <td className="py-3 px-2.5">
                             <div className="font-medium text-slate-800 dark:text-slate-200">
-                              {v.polyclinic.replace(/_/g, ' ')}
+                              {unitLabel(activeFacilityConfig?.units, v.polyclinic)}
                             </div>
                             <div className="text-caption text-slate-500">{v.doctorName}</div>
                           </td>
@@ -2042,7 +2047,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
 
                     <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800 text-xs space-y-1 font-mono text-slate-600 dark:text-slate-300">
                       <div>NIP / SIP / STR: {doc.nipOrSip || 'Belum diisi'}</div>
-                      <div>Poliklinik: {(doc.polyclinic || 'Belum ditentukan').replace(/_/g, ' ')}</div>
+                      <div>Unit tugas: {(doc.polyclinics && doc.polyclinics.length > 0 ? doc.polyclinics : doc.polyclinic ? [doc.polyclinic] : []).map((code) => unitLabel(activeFacilityConfig?.units, code)).join(', ') || 'Belum ditentukan'}</div>
                     </div>
                   </div>
 
@@ -2051,7 +2056,8 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                       type="button"
                       onClick={() => {
                         setDoctorId(doc.id);
-                        if (doc.polyclinic) setPolyclinic(doc.polyclinic);
+                        const assigned = doc.polyclinics && doc.polyclinics.length > 0 ? doc.polyclinics : doc.polyclinic ? [doc.polyclinic] : [];
+                        if (assigned.length === 1) setPolyclinic(assigned[0]);
                         if (allowedSubTabs.includes('QUEUE_REG')) {
                                 setSubTab('QUEUE_REG');
                                 setShowRegistrationForm(true);
@@ -2092,13 +2098,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                 className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
               >
                 <option value="ALL">Semua Kelas Kamar</option>
-                <option value="">Pilih kelas kamar</option>
-                  <option value="VIP">VIP</option>
-                <option value="KELAS_1">Kelas 1</option>
-                <option value="KELAS_2">Kelas 2</option>
-                <option value="KELAS_3">Kelas 3</option>
-                <option value="ICU">ICU / HCU</option>
-                <option value="ISOLASI">Isolasi</option>
+                {bedClassChoices.map((entry) => <option key={entry.code} value={entry.code}>{entry.name}</option>)}
               </select>
 
               <select
@@ -2171,13 +2171,10 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                   }
                   className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
                 >
-                  <option value="VIP">VIP</option>
-                  <option value="KELAS_1">KELAS 1</option>
-                  <option value="KELAS_2">KELAS 2</option>
-                  <option value="KELAS_3">KELAS 3</option>
-                  <option value="ICU">ICU / HCU</option>
-                  <option value="ISOLASI">ISOLASI</option>
+                  <option value="">Pilih kelas kamar</option>
+                  {bedClassChoices.map((entry) => <option key={entry.code} value={entry.code}>{entry.name}</option>)}
                 </select>
+                {bedClassChoices.length === 0 && <p className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">Belum ada kelas kamar. Superuser harus menambahkannya di Master unit & penjamin.</p>}
               </div>
               <div>
                 <label className="block text-xs font-semibold mb-1">Tarif / Hari</label>

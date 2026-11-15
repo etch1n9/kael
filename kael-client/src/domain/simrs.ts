@@ -191,6 +191,19 @@ export interface DynamicFormSchemaVersion {
   fields: DynamicFormFieldSchema[];
 }
 
+export interface FacilityGuarantor {
+  code: string;
+  name: string;
+  settlement: 'PATIENT' | 'BPJS';
+  active: boolean;
+}
+
+export interface FacilityBedClass {
+  code: string;
+  name: string;
+  active: boolean;
+}
+
 export interface FacilityUnitConfig {
   unitCode: string;
   unitName: string;
@@ -242,6 +255,8 @@ export interface SuperuserFacilityConfigSnapshot {
   enabledSubCapabilities: SubCapabilityKey[];
   activeServices: string[];
   units: FacilityUnitConfig[];
+  guarantors?: FacilityGuarantor[];
+  bedClasses?: FacilityBedClass[];
   terminologyOverrides: {
     outpatientUnitLabel: 'Ruang Praktik' | 'Poliklinik';
     triageProtocol: 'ATS_1_5' | 'KEMENKES_4_COLOR';
@@ -343,6 +358,7 @@ export interface UserAccount {
   roleName?: string;
   specialization?: string;
   polyclinic?: string;
+  polyclinics?: string[];
   isPractitioner?: boolean;
   active: boolean;
   lastLoginAt?: string;
@@ -535,7 +551,7 @@ export interface VisitQueueItem {
   polyclinic: string;
   doctorId: string;
   doctorName: string;
-  guarantor: 'UMUM' | 'BPJS_KESEHATAN' | 'ASURANSI_SWASTA' | 'KORPORASI';
+  guarantor: string;
   bpjsSepOrPcareNo?: string;
   visitType?: 'KUNJUNGAN_SAKIT' | 'KUNJUNGAN_SEHAT' | 'IGD_DARURAT' | 'RAWAT_INAP';
   triageLevel: TriageLevel;
@@ -557,7 +573,7 @@ export interface InpatientBed {
   wardName: string;
   roomNumber: string;
   bedCode: string;
-  bedClass: 'VVIP' | 'VIP' | 'KELAS_1' | 'KELAS_2' | 'KELAS_3' | 'ICU' | 'ISOLASI' | 'IGD_OBS';
+  bedClass: string;
   dailyRate: number;
   status: 'TERSEDIA' | 'TERISI' | 'DIBERSIHKAN' | 'MAINTENANCE';
   patientId?: string;
@@ -844,7 +860,7 @@ export interface InvoiceRecord {
   patientId: string;
   patientName: string;
   mrNumber: string;
-  guarantor: 'UMUM' | 'BPJS_KESEHATAN' | 'ASURANSI_SWASTA' | 'KORPORASI';
+  guarantor: string;
   items: BillingLineItem[];
   pricingStatus?: 'PENDING' | 'COMPLETE';
   unpricedItems?: { key: string; category: BillingLineItem['category']; description: string; quantity: number }[];

@@ -35,6 +35,7 @@ import { DataExportToolbar } from './DataExportToolbar';
 import { blankVitals, hasCompleteVitals } from '../utils/vitalSigns';
 import { VitalSignsFields } from './VitalSignsFields';
 import { ExportColumn } from '../utils/exportDocument';
+import { unitLabel } from '../utils/facilityMasters';
 
 import { ModuleKey } from '../domain/simrs.ts';
 
@@ -464,7 +465,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
                     {v.patientName} ({v.gender})
                   </div>
                   <div className="text-caption font-mono text-[#52736B] truncate">
-                    {v.mrNumber} · {v.polyclinic.replace('POLI_', '')}
+                    {v.mrNumber} · {unitLabel(workspace.activeFacilityConfig?.units, v.polyclinic)}
                   </div>
                 </button>
               );
@@ -579,7 +580,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
 
             <DataExportToolbar
               title={`Rekam Medis Elektronik - ${activePatient.fullName}`}
-              subtitle={`No. RM: ${activePatient.mrNumber} • Poli: ${activeVisit.polyclinic}`}
+              subtitle={`No. RM: ${activePatient.mrNumber} • Poli: ${unitLabel(workspace.activeFacilityConfig?.units, activeVisit.polyclinic)}`}
               filenameBase={`KAEL_RME_${activePatient.mrNumber}`}
               facilityName={workspace.activeFacility.name}
               facilityCode={facilityCode}

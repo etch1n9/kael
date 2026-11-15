@@ -954,27 +954,10 @@ export function buildDefaultFacilityConfigSnapshot(
     publishedAt: createdAt,
     changeNotes: 'Baseline konfigurasi kapabilitas awal fasilitas',
     enabledSubCapabilities,
-    activeServices: isHospital
-      ? ['RAWAT_JALAN_SPESIALIS', 'IGD_24_JAM', 'RAWAT_INAP', 'BEDAH_IBS', 'HEMODIALISIS', 'LAB_PATOLOGI', 'RADIOLOGI']
-      : isKlinikUtama
-      ? ['PRAKTIK_UMUM', 'POLIKLINIK_SPESIALIS', 'RAWAT_INAP_7_HARI', 'GIGI', 'KIA', 'LAB_DIAGNOSTIK']
-      : ['PRAKTIK_UMUM', 'PRAKTIK_GIGI', 'KIA_KB_IMUNISASI', 'PROLANIS_PRB', 'FARMASI_FKTP'],
-    units: isHospital
-      ? [
-          { unitCode: 'POLI_PD', unitName: 'Poliklinik Penyakit Dalam', unitType: 'POLIKLINIK_SPESIALIS', costCenterCode: 'CC-RJ-PD', active: true },
-          { unitCode: 'POLI_ANAK', unitName: 'Poliklinik Kesehatan Anak', unitType: 'POLIKLINIK_SPESIALIS', costCenterCode: 'CC-RJ-ANK', active: true },
-          { unitCode: 'POLI_BEDAH', unitName: 'Poliklinik Bedah Umum', unitType: 'POLIKLINIK_SPESIALIS', costCenterCode: 'CC-RJ-BDH', active: true },
-          { unitCode: 'IGD_24', unitName: 'Instalasi Gawat Darurat 24 Jam', unitType: 'IGD', costCenterCode: 'CC-IGD', active: true },
-          { unitCode: 'RANAP_UTAMA', unitName: 'Bangsal Rawat Inap Terpadu', unitType: 'BANGSAL_RANAP', costCenterCode: 'CC-RANAP', active: true },
-          { unitCode: 'IBS_OK', unitName: 'Instalasi Bedah Sentral', unitType: 'KAMAR_OPERASI', costCenterCode: 'CC-IBS', active: true },
-          { unitCode: 'DEPO_UTAMA', unitName: 'Instalasi Farmasi Sentral', unitType: 'DEPO_FARMASI', costCenterCode: 'CC-FAR', active: true },
-        ]
-      : [
-          { unitCode: 'PRAKTIK_UMUM', unitName: 'Ruang Praktik Dokter Umum', unitType: 'RUANG_PRAKTIK', costCenterCode: 'CC-KL-UMUM', active: true },
-          { unitCode: 'PRAKTIK_GIGI', unitName: 'Ruang Praktik Dokter Gigi', unitType: 'RUANG_PRAKTIK', costCenterCode: 'CC-KL-GIGI', active: true },
-          { unitCode: 'RUANG_KIA', unitName: 'Ruang KIA, KB & Imunisasi', unitType: 'RUANG_PRAKTIK', costCenterCode: 'CC-KL-KIA', active: true },
-          { unitCode: 'APOTEK_KLINIK', unitName: 'Apotek Klinik', unitType: 'DEPO_FARMASI', costCenterCode: 'CC-KL-FAR', active: true },
-        ],
+    activeServices: [],
+    units: [],
+    guarantors: [],
+    bedClasses: [],
     terminologyOverrides: {
       outpatientUnitLabel: isHospital ? 'Poliklinik' : 'Ruang Praktik',
       triageProtocol: 'ATS_1_5',

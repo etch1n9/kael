@@ -22,7 +22,9 @@ export function normalizeServerOrigin(value: string): string {
 export function defaultServerOrigin(): string {
   const url = new URL(window.location.origin);
   if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
-  url.port = KAEL_SERVER_PORT;
+  // Vite dev/preview keeps the API on 1507. A unified server (any other port)
+  // and an HTTPS tunnel (port 443) already serve /api on this page's origin.
+  if (url.port === '5173' || url.port === '4173') url.port = KAEL_SERVER_PORT;
   return url.origin;
 }
 

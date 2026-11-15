@@ -567,8 +567,15 @@ fn workspace(app: &App, context: &RequestContext) -> Value {
     if !superuser {
         config["storagePath"] = json!("");
     }
+    let facility_history = if !superuser {
+        Vec::new()
+    } else if code.is_empty() {
+        array(&app.db, "facilityConfigs").clone()
+    } else {
+        scoped("facilityConfigs")
+    };
     let mut result = json!({"user":sanitize_user(&app.db,user,code),"roles":app.db["roles"],"activeFacility":facility,
-        "facilityConfigHistory":if superuser {scoped("facilityConfigs")} else {vec![]},"evidenceRegistry":scoped("evidenceRegistry"),
+        "facilityConfigHistory":facility_history,"evidenceRegistry":scoped("evidenceRegistry"),
         "accessibleFacilities":accessible,"doctors":array(&app.db,"users").iter().filter(|entry| doctors_access && is_practitioner(app,entry,code)).map(|entry| sanitize_user(&app.db,entry,code)).collect::<Vec<_>>(),
         "patients":scoped("patients"),"visits":scoped("visits"),"soapRecords":if clinical {scoped("soapRecords")} else {vec![]},
         "beds":scoped("beds"),"medications":scoped("medications"),"medicationMutations":scoped("medicationMutations"),

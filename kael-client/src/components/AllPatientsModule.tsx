@@ -32,6 +32,7 @@ import { ExportColumn } from '../utils/exportDocument';
 import { blankVitals, hasCompleteVitals } from '../utils/vitalSigns';
 import { VitalSignsFields } from './VitalSignsFields';
 import { ModalDialog } from './ModalDialog';
+import { activeGuarantors, unitLabel, visitUnits } from '../utils/facilityMasters';
 
 interface AllPatientsModuleProps {
   token: string;
@@ -109,14 +110,10 @@ export function AllPatientsModule({
   const [formAllergies, setFormAllergies] = useState('');
   const [formChronic, setFormChronic] = useState('');
 
-  const facilityPolyclinics = useMemo(() => Array.from(new Set([
-    ...(activeFacility.polyclinics || []),
-    ...(activeFacilityConfig?.units || [])
-      .filter((unit) => unit.active && ['RUANG_PRAKTIK', 'POLIKLINIK_SPESIALIS', 'IGD'].includes(unit.unitType))
-      .map((unit) => unit.unitCode),
-    ...doctors.map((doctor) => doctor.polyclinic || ''),
-    ...visits.map((visit) => visit.polyclinic),
-  ].filter(Boolean))), [activeFacility.polyclinics, activeFacilityConfig?.units, doctors, visits]);
+  const facilityPolyclinics = useMemo(
+    () => visitUnits(activeFacilityConfig),
+    [activeFacilityConfig],
+  );
 
   // Quick Queue Form State
   const [queuePoly, setQueuePoly] = useState('');
@@ -410,7 +407,7 @@ export function AllPatientsModule({
   const handleQuickQueueSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!quickQueuePatient) return;
-    if (!facilityPolyclinics.includes(queuePoly) || !doctors.some((doctor) => doctor.id === queueDoctorId) || !queueGuarantor || !queueComplaint.trim()) {
+    if (!facilityPolyclinics.some((unit) => unit.unitCode === queuePoly) || !doctors.some((doctor) => doctor.id === queueDoctorId) || !queueGuarantor || !queueComplaint.trim()) {
       setQueueError('Pilih poliklinik, tenaga medis, dan penjamin, lalu isi keluhan utama.');
       return;
     }
@@ -629,9 +626,9 @@ export function AllPatientsModule({
               className="w-full px-3 py-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714] text-xs text-[#0F2922] dark:text-white"
             >
               <option value="ALL">Semua Poliklinik</option>
-              {facilityPolyclinics.map((poly: string) => (
-                <option key={poly} value={poly}>
-                  {poly}
+              {facilityPolyclinics.map((unit) => (
+                <option key={unit.unitCode} value={unit.unitCode}>
+                  {unit.unitName}
                 </option>
               ))}
             </select>
@@ -650,9 +647,9 @@ export function AllPatientsModule({
             >
               <option value="ALL">Semua Penjamin</option>
               <option value="BPJS_TERDAFTAR">Memiliki Nomor BPJS Aktif</option>
-              <option value="BPJS_KESEHATAN">Kunjungan BPJS Kesehatan</option>
-              <option value="UMUM_MANDIRI">Pasien Umum / Mandiri</option>
-              <option value="ASURANSI_SWASTA">Asuransi Swasta / Korporat</option>
+              {activeGuarantors(activeFacilityConfig).map((entry) => (
+                <option key={entry.code} value={entry.code}>{entry.name}</option>
+              ))}
             </select>
           </div>
 
@@ -1067,7 +1064,7 @@ export function AllPatientsModule({
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="font-mono text-xs font-bold text-[#00897B]">
-                            {v.queueNumber} • {v.polyclinic}
+                            {v.queueNumber} • {unitLabel(activeFacilityConfig?.units, v.polyclinic)}
                           </span>
                           <span className="text-caption font-mono text-[#52736B]">
                             {v.createdAt.slice(0, 16).replace('T', ' ')} • {v.status}
@@ -1278,7 +1275,7 @@ export function AllPatientsModule({
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5 space-y-4 text-xs">
               {queueError && <p role="alert" className="rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/50 p-3 text-red-700 dark:text-red-300">{queueError}</p>}
               <div>
-                <label className="block font-semibold mb-1">Poliklinik Tujuan</label>
+                <label className="block font-semibold mb-1">Unit Tujuan</label>
                 <select
                   aria-label="Poliklinik tujuan antrean"
                   value={queuePoly}
@@ -1287,13 +1284,13 @@ export function AllPatientsModule({
                   className="w-full px-3 py-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
                 >
                   <option value="" disabled>Pilih poliklinik</option>
-                  {facilityPolyclinics.map((p: string) => (
-                    <option key={p} value={p}>
-                      {p}
+                  {facilityPolyclinics.map((unit) => (
+                    <option key={unit.unitCode} value={unit.unitCode}>
+                      {unit.unitName}
                     </option>
                   ))}
                 </select>
-                {facilityPolyclinics.length === 0 && <p className="mt-1 text-[#52736B]">Belum ada poliklinik yang tercatat untuk fasilitas ini.</p>}
+                {facilityPolyclinics.length === 0 && <p className="mt-1 text-[#52736B]">Belum ada unit. Superuser harus menambahkannya di Master unit & penjamin.</p>}
               </div>
               <div>
                 <label className="block font-semibold mb-1">Dokter / Tenaga Medis Pemeriksa</label>
@@ -1325,11 +1322,11 @@ export function AllPatientsModule({
                   className="w-full px-3 py-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
                 >
                   <option value="" disabled>Pilih penjamin</option>
-                  <option value="BPJS_KESEHATAN">BPJS Kesehatan</option>
-                  <option value="UMUM">Umum / Mandiri</option>
-                  <option value="ASURANSI_SWASTA">Asuransi Swasta</option>
-                  <option value="KORPORASI">Jaminan Perusahaan / Korporasi</option>
+                  {activeGuarantors(activeFacilityConfig).map((entry) => (
+                    <option key={entry.code} value={entry.code}>{entry.name}</option>
+                  ))}
                 </select>
+                {activeGuarantors(activeFacilityConfig).length === 0 && <p className="mt-1 text-[#52736B]">Belum ada penjamin. Superuser harus menambahkannya di Master unit & penjamin.</p>}
               </div>
               <div>
                 <label className="block font-semibold mb-1">Keluhan Utama Kedatangan</label>
