@@ -15,11 +15,24 @@ use crate::domain::{default_facility_config, normalize_facility};
 use crate::storage::Storage;
 
 pub struct App {
+    #[allow(dead_code)]
     pub config: Config,
     pub store: Storage,
     pub db: Value,
     pub sessions: HashMap<String, Session>,
-    pub saved_state: Value,
+    pub login_failures: HashMap<String, LoginAttempt>,
+}
+
+pub struct Shared {
+    pub app: Mutex<App>,
+    pub config: Config,
+}
+
+#[derive(Clone)]
+pub struct LoginAttempt {
+    pub count: u8,
+    pub window_start: i64,
+    pub locked_until: i64,
 }
 
 #[derive(Clone)]
@@ -88,7 +101,18 @@ pub fn id(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4())
 }
 
+pub fn next_document(rows: &[Value], field: &str, prefix: &str) -> u32 {
+    rows.iter()
+        .filter_map(|row| text(row, field).strip_prefix(prefix)?.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
 static EMPTY_ROWS: LazyLock<Vec<Value>> = LazyLock::new(Vec::new);
+static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
+    hash_password("kael-login-dummy").unwrap_or_default()
+});
 pub fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
     value
         .get(key)
@@ -232,16 +256,52 @@ pub fn audit(app: &mut App, context: &RequestContext, action: &str, target: &str
         "actorUsername":text(&context.user,"username"),"actorRole":text(&context.user,"role"),
         "action":action,"targetResource":target,"details":details});
     let rows = array_mut(&mut app.db, "auditLogs");
-    rows.insert(0, entry);
+    rows.push(entry);
+    if rows.len() > 2000 {
+        let overflow = rows.len() - 2000;
+        rows.drain(0..overflow);
+    }
+}
+
+fn cap_sessions(app: &mut App) {
+    let now = Utc::now().timestamp_millis();
+    app.sessions.retain(|_, session| session.expires_at > now);
+    let mut grouped: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+    for (token, session) in &app.sessions {
+        grouped.entry(session.user_id.clone()).or_default().push((token.clone(), session.expires_at));
+    }
+    for entries in grouped.values_mut() {
+        if entries.len() <= 5 {
+            continue;
+        }
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        for (token, _) in entries.iter().skip(5) {
+            app.sessions.remove(token);
+        }
+    }
 }
 
 pub fn save(app: &mut App) -> Result<(), ApiError> {
+    cap_sessions(app);
     if let Err(message) = app.store.save(&app.db) {
-        app.db = app.saved_state.clone();
+        let loaded = app.store.reload();
+        if let Ok(value) = loaded {
+            app.db = value;
+        }
         eprintln!("KAEL gagal menyimpan database: {message}");
         return Err(error(500, "Permintaan gagal disimpan server."));
     }
-    app.saved_state = app.db.clone();
+    let packed = app.sessions.iter().map(|(token, session)| {
+        (token.clone(), (session.user_id.clone(), session.facility_code.clone(), session.expires_at))
+    }).collect();
+    if let Err(message) = app.store.save_sessions(&packed) {
+        let loaded = app.store.reload();
+        if let Ok(value) = loaded {
+            app.db = value;
+        }
+        eprintln!("KAEL gagal menyimpan sesi: {message}");
+        return Err(error(500, "Permintaan gagal disimpan server."));
+    }
     Ok(())
 }
 
@@ -337,17 +397,80 @@ fn authorize(app: &mut App, headers: &HeaderMap, path: &str) -> Result<RequestCo
 }
 
 fn login(app: &mut App, body: &Value) -> ApiResult {
+    let prep = login_prepare(app, body, "local")?;
+    let ok = verify_password(&prep.password, &prep.hash);
+    login_commit(app, body, &prep, ok)
+}
+
+struct LoginPrep {
+    key: String,
+    password: String,
+    hash: String,
+    found: bool,
+}
+
+fn login_prepare(app: &mut App, body: &Value, ip: &str) -> Result<LoginPrep, ApiError> {
     let username = text(body, "username").trim().to_lowercase();
     let password = text(body, "password");
     if username.is_empty()
         || password.is_empty()
         || password.chars().count() > 512
-        || body
-            .get("facilityCode")
-            .is_some_and(|value| !value.is_string())
+        || body.get("facilityCode").is_some_and(|value| !value.is_string())
     {
         return Err(bad_request("Username dan kata sandi wajib diisi."));
     }
+    let key = format!("{ip}|{username}");
+    let now_ms = Utc::now().timestamp_millis();
+    if let Some(attempt) = app.login_failures.get(&key) {
+        if attempt.locked_until > now_ms {
+            return Err(error(
+                429,
+                "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.",
+            ));
+        }
+    }
+    let found = array(&app.db, "users").iter().position(|user| {
+        text(user, "username").to_lowercase() == username
+            || text(user, "nipOrSip").to_lowercase() == username
+    });
+    let hash = found
+        .map(|index| text(&app.db["users"][index], "passwordHash").to_owned())
+        .filter(|hash| hash.starts_with("scrypt:"))
+        .unwrap_or_else(|| DUMMY_HASH.clone());
+    Ok(LoginPrep {
+        key,
+        password: password.to_owned(),
+        hash,
+        found: found.is_some(),
+    })
+}
+
+fn note_login_failure(app: &mut App, key: &str) {
+    let now_ms = Utc::now().timestamp_millis();
+    let attempt = app.login_failures.entry(key.to_owned()).or_insert(LoginAttempt {
+        count: 0,
+        window_start: now_ms,
+        locked_until: 0,
+    });
+    if now_ms - attempt.window_start > 5 * 60 * 1000 {
+        attempt.count = 0;
+        attempt.window_start = now_ms;
+    }
+    attempt.count += 1;
+    if attempt.count >= 5 {
+        attempt.locked_until = now_ms + 15 * 60 * 1000;
+        attempt.count = 0;
+        attempt.window_start = now_ms;
+    }
+}
+
+fn login_commit(app: &mut App, body: &Value, prep: &LoginPrep, password_ok: bool) -> ApiResult {
+    if !prep.found || !password_ok {
+        note_login_failure(app, &prep.key);
+        return Err(login_denied());
+    }
+    app.login_failures.remove(&prep.key);
+    let username = prep.key.split('|').nth(1).unwrap_or("");
     let index = array(&app.db, "users")
         .iter()
         .position(|user| {
@@ -356,10 +479,11 @@ fn login(app: &mut App, body: &Value) -> ApiResult {
         })
         .ok_or_else(login_denied)?;
     let user = app.db["users"][index].clone();
-    if user["active"] != true || !text(&user, "deletedAt").is_empty() {
-        return Err(login_denied());
-    }
-    if !verify_password(password, text(&user, "passwordHash")) {
+    if user["active"] != true
+        || !text(&user, "deletedAt").is_empty()
+        || text(&user, "passwordHash") != prep.hash
+    {
+        note_login_failure(app, &prep.key);
         return Err(login_denied());
     }
     let facility_code = normalize_facility(text(body, "facilityCode"));
@@ -370,10 +494,8 @@ fn login(app: &mut App, body: &Value) -> ApiResult {
         .unwrap_or(Value::Null);
     if (facility_code.is_empty() && text(&user, "role") != "SUPERUSER")
         || (!facility_code.is_empty() && facility.is_null())
+        || (!facility.is_null() && !can_access_facility(&user, &facility_code))
     {
-        return Err(login_denied());
-    }
-    if !facility.is_null() && !can_access_facility(&user, &facility_code) {
         return Err(login_denied());
     }
     let role = effective_role(&user, &facility_code);
@@ -392,11 +514,6 @@ fn login(app: &mut App, body: &Value) -> ApiResult {
     let expires_at =
         Utc::now().timestamp_millis() + (if remember { 7 * 1440 } else { configured }) * 60_000;
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    if !text(&user, "passwordHash").starts_with("scrypt:") {
-        app.db["users"][index]["passwordHash"] = json!(
-            hash_password(password).map_err(|_| error(500, "Kata sandi tidak dapat diproses."))?
-        );
-    }
     app.db["users"][index]["lastLoginAt"] = json!(now());
     let context = RequestContext {
         user: user.clone(),
@@ -414,7 +531,6 @@ fn login(app: &mut App, body: &Value) -> ApiResult {
         },
         "Login berhasil.",
     );
-    save(app)?;
     app.sessions.insert(
         token.clone(),
         Session {
@@ -423,6 +539,7 @@ fn login(app: &mut App, body: &Value) -> ApiResult {
             expires_at,
         },
     );
+    save(app)?;
     let accessible: Vec<Value> = array(&app.db, "facilities")
         .iter()
         .filter(|entry| entry["active"] == true && can_access_facility(&user, text(entry, "code")))
@@ -442,7 +559,42 @@ fn login_denied() -> ApiError {
     )
 }
 
-fn workspace(app: &App, context: &RequestContext) -> Value {
+fn query_window(query: &str) -> (usize, String, String) {
+    let mut limit = 500usize;
+    let mut from = String::new();
+    let mut to = String::new();
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("").trim().to_owned();
+        match key {
+            "limit" => limit = value.parse::<usize>().unwrap_or(500).clamp(1, 500),
+            "from" => from = value,
+            "to" => to = value,
+            _ => {}
+        }
+    }
+    (limit, from, to)
+}
+
+fn in_window(entry: &Value, from: &str, to: &str) -> bool {
+    let stamp = if text(entry, "createdAt").is_empty() { text(entry, "timestamp") } else { text(entry, "createdAt") };
+    (from.is_empty() || stamp >= from || stamp.starts_with(from))
+        && (to.is_empty() || stamp <= to || stamp.starts_with(to))
+}
+
+fn present(mut rows: Vec<Value>, limit: usize) -> Vec<Value> {
+    rows.reverse();
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+    rows
+}
+
+fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
+    let (limit, from_owned, to_owned) = query_window(query);
+    let from = from_owned.as_str();
+    let to = to_owned.as_str();
     let user = &context.user;
     let code = &context.facility_code;
     let superuser = text(user, "role") == "SUPERUSER";
@@ -545,11 +697,7 @@ fn workspace(app: &App, context: &RequestContext) -> Value {
         if code.is_empty() || !collection_access(key) {
             return vec![];
         }
-        array(&app.db, key)
-            .iter()
-            .filter(|entry| text(entry, "facilityCode") == code)
-            .cloned()
-            .collect()
+        present(array(&app.db, key).iter().filter(|entry| text(entry, "facilityCode") == code && in_window(entry, from, to)).cloned().collect(), limit)
     };
     let visible_users: Vec<Value> = array(&app.db, "users")
         .iter()
@@ -581,10 +729,10 @@ fn workspace(app: &App, context: &RequestContext) -> Value {
         "beds":scoped("beds"),"medications":scoped("medications"),"medicationMutations":scoped("medicationMutations"),
         "pharmacyOrders":scoped("pharmacyOrders"),"purchaseOrders":scoped("purchaseOrders"),"labOrders":scoped("labOrders"),
         "radiologyOrders":scoped("radiologyOrders"),"surgicalSchedules":scoped("surgicalSchedules"),
-        "referrals":array(&app.db,"referrals").iter().filter(|entry| referrals_access && !code.is_empty() && (text(entry,"originFacilityCode") == code || text(entry,"destinationFacilityCode") == code)).cloned().collect::<Vec<_>>(),
+        "referrals":present(array(&app.db,"referrals").iter().filter(|entry| referrals_access && !code.is_empty() && (text(entry,"originFacilityCode") == code || text(entry,"destinationFacilityCode") == code) && in_window(entry, from, to)).cloned().collect(), limit),
         "invoices":if finance {scoped("invoices")} else {vec![]},"accountingEntries":if finance {scoped("accountingEntries")} else {vec![]},
         "doubleEntryJournals":if finance {scoped("doubleEntryJournals")} else {vec![]},"bridgingLogs":scoped("bridgingLogs"),
-        "auditLogs":if superuser {array(&app.db,"auditLogs").clone()} else {vec![]},"allUsers":visible_users,
+        "auditLogs":if superuser {present(array(&app.db,"auditLogs").iter().filter(|entry| in_window(entry, from, to)).cloned().collect(), limit)} else {vec![]},"allUsers":visible_users,
         "deletedUsers":if superuser {array(&app.db,"users").iter().filter(|entry| !text(entry,"deletedAt").is_empty()).map(|entry| sanitize_user(&app.db,entry,code)).collect::<Vec<_>>()} else {vec![]},
         "allFacilities":if superuser {array(&app.db,"facilities").clone()} else {accessible.clone()},"serverConfig":config});
     let mut data_access = serde_json::Map::new();
@@ -628,15 +776,20 @@ fn workspace(app: &App, context: &RequestContext) -> Value {
             .filter(|code| allows(app, user, code, "KEUANGAN_OWNER"))
             .collect();
         for key in ["accountingEntries", "invoices", "visits"] {
-            result["multiFacilityFinance"][key] = json!(
+            result["multiFacilityFinance"][key] = json!(present(
                 array(&app.db, key)
                     .iter()
                     .filter(|entry| codes.contains(&text(entry, "facilityCode"))
-                        && (key != "visits" || can_read_visits_at(text(entry, "facilityCode"))))
+                        && (key != "visits" || can_read_visits_at(text(entry, "facilityCode")))
+                        && in_window(entry, from, to))
                     .cloned()
-                    .collect::<Vec<_>>()
-            );
+                    .collect::<Vec<_>>(),
+                limit
+            ));
         }
+    }
+    for key in ["attendance", "leaveRequests", "payrollRuns"] {
+        result[key] = json!(present(array(&app.db, key).iter().filter(|entry| (code.is_empty() || text(entry, "facilityCode") == code) && in_window(entry, from, to)).cloned().collect(), limit));
     }
     result
 }
@@ -645,6 +798,7 @@ fn dispatch(
     app: &mut App,
     method: &str,
     path: &str,
+    query: &str,
     headers: &HeaderMap,
     body: &Value,
 ) -> ApiResult {
@@ -667,12 +821,13 @@ fn dispatch(
             .and_then(|entry| entry.strip_prefix("Bearer "))
         {
             app.sessions.remove(token.trim());
+            let _ = app.store.delete_session(token.trim());
         }
         return no_content();
     }
     let context = authorize(app, headers, path)?;
     if method == "GET" && path == "/api/workspace" {
-        return json_response(200, workspace(app, &context));
+        return json_response(200, workspace(app, &context, query));
     }
     if method == "POST" && path == "/api/auth/switch-facility" {
         let code = normalize_facility(text(body, "facilityCode"));
@@ -771,83 +926,58 @@ fn api_headers(response: &mut Response, origin: Option<&str>, allowed: bool) {
     }
 }
 
-pub async fn serve(State(state): State<Arc<Mutex<App>>>, request: Request) -> Response {
+pub async fn serve(State(state): State<Arc<Shared>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().trim_end_matches('/').to_owned();
-    let path = if path.is_empty() {
-        "/".to_owned()
-    } else {
-        path
-    };
+    let path = if path.is_empty() { "/".to_owned() } else { path };
     if path != "/api" && !path.starts_with("/api/") {
-        return match state.lock() {
-            Ok(app) => static_file(&app.config, &path, parts.method.as_str()),
-            Err(_) => response(Err(error(500, "Layanan belum tersedia."))),
-        };
+        return static_file(&state.config, &path, parts.method.as_str());
     }
     let bytes = to_bytes(body, 5 * 1024 * 1024).await;
-    let mut app = match state.lock() {
-        Ok(app) => app,
-        Err(_) => return response(Err(error(500, "Layanan belum tersedia."))),
-    };
-    let origin = parts
-        .headers
-        .get("origin")
-        .and_then(|entry| entry.to_str().ok());
-    let allowed = origin.is_some_and(|origin| {
-        app.config
-            .client_origins
-            .iter()
-            .any(|entry| entry == origin)
-    });
-    if parts.method == "OPTIONS" && parts.headers.contains_key("access-control-request-method") {
-        let mut result = response(if allowed {
-            no_content()
-        } else {
-            Err(forbidden(
-                "Origin klien belum diizinkan oleh konfigurasi server.",
-            ))
-        });
-        api_headers(&mut result, origin, allowed);
-        return result;
-    }
+    let origin = parts.headers.get("origin").and_then(|entry| entry.to_str().ok());
+    let allowed = origin.is_some_and(|origin| state.config.client_origins.iter().any(|entry| entry == origin));
     let parsed = match bytes {
         Err(_) => Err(error(413, "Ukuran permintaan melebihi batas server.")),
         Ok(bytes) if bytes.is_empty() => Ok(json!({})),
         Ok(bytes) => {
-            let content_type = parts
-                .headers
-                .get("content-type")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("");
-            if !content_type
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .eq_ignore_ascii_case("application/json")
-            {
+            let content_type = parts.headers.get("content-type").and_then(|value| value.to_str().ok()).unwrap_or("");
+            if !content_type.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json") {
                 Err(error(415, "Gunakan Content-Type application/json."))
             } else {
-                serde_json::from_slice::<Value>(&bytes)
-                    .map_err(|_| bad_request("JSON permintaan tidak valid."))
+                serde_json::from_slice::<Value>(&bytes).map_err(|_| bad_request("JSON permintaan tidak valid."))
             }
         }
     };
-    app.sessions
-        .retain(|_, session| session.expires_at > Utc::now().timestamp_millis());
+    if parts.method == "POST" && path == "/api/auth/login" {
+        let result = match parsed {
+            Err(error) => Err(error),
+            Ok(body) => login_outside_lock(&state, &body, client_ip(&parts.headers)).await,
+        };
+        let mut result = response(result);
+        api_headers(&mut result, origin, allowed);
+        return result;
+    }
+    let mut app = match state.app.lock() {
+        Ok(app) => app,
+        Err(_) => return response(Err(error(500, "Layanan belum tersedia."))),
+    };
+    if parts.method == "OPTIONS" && parts.headers.contains_key("access-control-request-method") {
+        let mut result = response(if allowed { no_content() } else { Err(forbidden("Origin klien belum diizinkan oleh konfigurasi server.")) });
+        api_headers(&mut result, origin, allowed);
+        return result;
+    }
+    app.sessions.retain(|_, session| session.expires_at > Utc::now().timestamp_millis());
     let result = parsed.and_then(|body| {
         if !body.is_object() {
             return Err(bad_request("Isi permintaan harus berupa objek JSON."));
         }
-        let method = if parts.method == "HEAD" {
-            "GET"
-        } else {
-            parts.method.as_str()
-        };
-        let result = dispatch(&mut app, method, &path, &parts.headers, &body);
+        let method = if parts.method == "HEAD" { "GET" } else { parts.method.as_str() };
+        let result = dispatch(&mut app, method, &path, parts.uri.query().unwrap_or(""), &parts.headers, &body);
         if result.is_err() {
-            app.db = app.saved_state.clone();
+            let loaded = app.store.reload();
+        if let Ok(value) = loaded {
+            app.db = value;
+        }
         }
         result
     });
@@ -857,6 +987,31 @@ pub async fn serve(State(state): State<Arc<Mutex<App>>>, request: Request) -> Re
     }
     api_headers(&mut result, origin, allowed);
     result
+}
+
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("local")
+        .to_owned()
+}
+
+async fn login_outside_lock(state: &Shared, body: &Value, ip: String) -> ApiResult {
+    let prep = {
+        let mut app = state.app.lock().map_err(|_| error(500, "Layanan belum tersedia."))?;
+        login_prepare(&mut app, body, &ip)?
+    };
+    let password = prep.password.clone();
+    let hash = prep.hash.clone();
+    let ok = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
+        .await
+        .unwrap_or(false);
+    let mut app = state.app.lock().map_err(|_| error(500, "Layanan belum tersedia."))?;
+    login_commit(&mut app, body, &prep, ok)
 }
 
 fn static_file(config: &Config, path: &str, method: &str) -> Response {
@@ -886,9 +1041,19 @@ fn static_file(config: &Config, path: &str, method: &str) -> Response {
     };
     let resolved = match (root.canonicalize(), requested.canonicalize()) {
         (Ok(root), Ok(file)) if file.starts_with(&root) && file.is_file() => file,
-        _ => return StatusCode::NOT_FOUND.into_response(),
+        _ => {
+            let extension = Path::new(relative).extension().is_some();
+            if extension {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            return static_bytes(config, &root.join("index.html"), method);
+        }
     };
-    let bytes = match std::fs::read(&resolved) {
+    static_bytes(config, &resolved, method)
+}
+
+fn static_bytes(config: &Config, resolved: &Path, method: &str) -> Response {
+    let bytes = match std::fs::read(resolved) {
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
@@ -928,6 +1093,8 @@ fn static_file(config: &Config, path: &str, method: &str) -> Response {
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     let csp = format!(
         "default-src 'self'; connect-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
         config.api_origins.join(" ")

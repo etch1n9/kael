@@ -1,5 +1,5 @@
 // Browser presentation and previews use API-provided permissions. Operations are validated by the server.
-import { canUserAccessModule, getInvoiceOutstanding } from './clinicalLogic.ts';
+import { canUserAccessModule, getInvoiceOutstanding, isBpjsRecord } from './clinicalLogic.ts';
 
 import type {
   AccountingEntry,
@@ -807,16 +807,16 @@ export function resolveFacilityNavigation(
     // 06. SDM & KEPEGAWAIAN
     {
       key: 'SDM_JADWAL',
-      label: 'Kepegawaian',
-      subtitle: 'Status ketersediaan pencatatan kepegawaian',
+      label: 'Jadwal & shift SDM',
+      subtitle: 'Pencatatan kehadiran dan jadwal pegawai',
       category: 'SDM_KEPEGAWAIAN',
       shortKey: 'Alt+H',
       requiredSubCapabilities: ['SUB_MEDICAL_FEE_PAYROLL'],
     },
     {
       key: 'SDM_ERP',
-      label: 'Kepegawaian',
-      subtitle: 'Status ketersediaan presensi, cuti, dan penggajian',
+      label: 'Presensi, cuti & penggajian',
+      subtitle: 'Catatan kehadiran, cuti, dan penggajian',
       category: 'SDM_KEPEGAWAIAN',
       shortKey: 'Alt+S',
       requiredSubCapabilities: ['SUB_MEDICAL_FEE_PAYROLL'],
@@ -866,14 +866,7 @@ export function resolveFacilityNavigation(
 
     return canUserAccessModule({ ...user, role: effectiveRole }, item.key);
   });
-
-  const keys = new Set(visibleItems.map((item) => item.key));
-  return visibleItems.filter((item) => {
-    if (item.key === 'MUTASI_STOK' && keys.has('KATALOG_OPNAME')) return false;
-    if (['NERACA_GL', 'JASA_MEDIS_REMUN'].includes(item.key) && keys.has('KEUANGAN_OWNER')) return false;
-    if (item.key === 'SDM_ERP' && keys.has('SDM_JADWAL')) return false;
-    return true;
-  });
+  return visibleItems;
 }
 
 
@@ -1198,7 +1191,7 @@ export function computeErpCompleteFinancialAnalysis(params: {
   }
   const totalReceivables = receivableBuckets.reduce((sum, value) => sum + value, 0);
   const totalPayablePbf = payableBuckets.reduce((sum, value) => sum + value, 0);
-  const claims = params.invoices.filter((invoice) => invoice.guarantor === 'BPJS_KESEHATAN' && invoice.pricingStatus !== 'PENDING');
+  const claims = params.invoices.filter((invoice) => isBpjsRecord(invoice) && invoice.pricingStatus !== 'PENDING');
   const approvedClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_DISETUJUI').length;
   const pendingDisputeClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_PENDING_DISPUTE').length;
   const rejectedClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_DITOLAK').length;

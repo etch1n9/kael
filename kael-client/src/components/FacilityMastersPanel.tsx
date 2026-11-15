@@ -7,7 +7,7 @@ import {
   SuperuserFacilityConfigSnapshot,
 } from '../domain/simrs.ts';
 import { kaelApi, WorkspacePayload } from '../utils/apiClient';
-import { UNIT_DESTINATION_CHOICES, masterCode } from '../utils/facilityMasters';
+import { UNIT_DESTINATION_CHOICES, UNIT_TYPE_CHOICES, masterCode, unitTypeForDestination } from '../utils/facilityMasters';
 import { buildDefaultFacilityConfigSnapshot } from '../domain/platformEngine.ts';
 
 interface FacilityMastersPanelProps {
@@ -28,6 +28,7 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
   const [bedClasses, setBedClasses] = useState<FacilityBedClass[]>(snapshot.bedClasses || []);
   const [unitChoice, setUnitChoice] = useState('');
   const [customUnitName, setCustomUnitName] = useState('');
+  const [customUnitType, setCustomUnitType] = useState<FacilityUnitConfig['unitType']>('RUANG_PRAKTIK');
   const [payerName, setPayerName] = useState('');
   const [payerBpjs, setPayerBpjs] = useState(false);
   const [className, setClassName] = useState('');
@@ -45,7 +46,7 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
     setUnits((current) => [...current, {
       unitCode: code,
       unitName: name,
-      unitType: name.toLowerCase() === 'igd' ? 'IGD' : 'POLIKLINIK_SPESIALIS',
+      unitType: unitChoice === 'CUSTOM' ? customUnitType : unitTypeForDestination(name),
       costCenterCode: '',
       active: true,
     }]);
@@ -110,7 +111,12 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
           <button type="button" onClick={addUnit} className="inline-flex items-center justify-center gap-1 rounded-lg bg-[#00897B] px-3 py-2 text-xs font-semibold text-white"><Plus className="h-3.5 w-3.5" />Tambah</button>
         </div>
         {unitChoice === 'CUSTOM' && (
-          <input value={customUnitName} onChange={(event) => setCustomUnitName(event.target.value)} placeholder="Nama unit tujuan" className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950" />
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <input value={customUnitName} onChange={(event) => setCustomUnitName(event.target.value)} placeholder="Nama unit tujuan" className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950" />
+            <select value={customUnitType} onChange={(event) => setCustomUnitType(event.target.value as FacilityUnitConfig['unitType'])} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950">
+              {UNIT_TYPE_CHOICES.map((choice) => <option key={choice.code} value={choice.code}>{choice.label}</option>)}
+            </select>
+          </div>
         )}
         <MasterList
           empty="Belum ada unit tujuan."

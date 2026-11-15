@@ -861,6 +861,7 @@ export interface InvoiceRecord {
   patientName: string;
   mrNumber: string;
   guarantor: string;
+  guarantorSettlement?: string;
   items: BillingLineItem[];
   pricingStatus?: 'PENDING' | 'COMPLETE';
   unpricedItems?: { key: string; category: BillingLineItem['category']; description: string; quantity: number }[];

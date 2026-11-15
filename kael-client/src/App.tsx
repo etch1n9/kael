@@ -1109,6 +1109,10 @@ export default function App() {
                     activeFacility={effectiveFacility}
                     currentUser={effectiveUser}
                     allUsers={workspace.allUsers || workspace.doctors}
+                    token={session.token}
+                    facilityCode={effectiveFacility.code}
+                    workspace={workspace}
+                    onRefreshWorkspace={() => fetchActiveWorkspace(session)}
                     initialView={visibleModule}
                   />
                 )}

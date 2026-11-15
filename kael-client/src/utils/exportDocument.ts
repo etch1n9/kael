@@ -25,6 +25,10 @@ function escapeHtml(value: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
+function spreadsheetSafe(value: string): string {
+  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+}
+
 function extractCellValue<T>(row: T, col: ExportColumn<T>): string {
   if (col.format) {
     const formatted = col.format(row);
@@ -57,7 +61,7 @@ export function exportToCsv<T>(payload: ExportDocumentPayload<T>): void {
   const lines = payload.rows.map((row) =>
     payload.columns
       .map((col) => {
-        const val = extractCellValue(row, col).replace(/"/g, '""');
+        const val = spreadsheetSafe(extractCellValue(row, col)).replace(/"/g, '""');
         return `"${val}"`;
       })
       .join(',')
@@ -84,7 +88,7 @@ export function exportToExcelXml<T>(payload: ExportDocumentPayload<T>): void {
     .map((row) => {
       const cells = payload.columns
         .map((col) => {
-          const val = extractCellValue(row, col);
+          const val = spreadsheetSafe(extractCellValue(row, col));
           const numericClean = val.replace(/[^0-9.-]/g, '');
           const isStrictNum =
             /^-?\d+(\.\d+)?$/.test(val.trim()) &&
@@ -442,10 +446,13 @@ export function exportToPdf<T>(payload: ExportDocumentPayload<T>): void {
     }
   }
 
+  if (pages.length > 40) {
+    exportToCsv(payload);
+    return;
+  }
   const jpegPages: { dataUrl: string; widthPx: number; heightPx: number }[] = [];
-
+  const pageCanvas = document.createElement('canvas');
   pages.forEach((pageRows, pageIndex) => {
-    const pageCanvas = document.createElement('canvas');
     pageCanvas.width = canvasW;
     pageCanvas.height = canvasH;
     const ctx = pageCanvas.getContext('2d')!;
@@ -603,6 +610,8 @@ export function exportToPdf<T>(payload: ExportDocumentPayload<T>): void {
       widthPx: canvasW,
       heightPx: canvasH,
     });
+    pageCanvas.width = 0;
+    pageCanvas.height = 0;
   });
 
   const pdfBytes = buildPdfBinaryFromJpegDataUrls(jpegPages);

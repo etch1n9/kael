@@ -84,6 +84,7 @@ export function AllPatientsModule({
 
   const [genderFilter, setGenderFilter] = useState<'ALL' | 'L' | 'P'>('ALL');
   const [guarantorFilter, setGuarantorFilter] = useState<string>('ALL');
+  const [patientPage, setPatientPage] = useState(0);
   const [polyFilter, setPolyFilter] = useState<string>('ALL');
   const [clinicalFlagFilter, setClinicalFlagFilter] = useState<
     'ALL' | 'WITH_ALLERGY' | 'WITH_CHRONIC'
@@ -288,7 +289,7 @@ export function AllPatientsModule({
       {
         key: 'gender',
         header: 'JK / Usia',
-        format: (r) => `${r.gender} · ${calculateAgeYears(r.birthDate)} thn`,
+        format: (r) => `${r.gender} · ${calculateAgeYears(r.birthDate) ?? '—'} thn`,
       },
       { key: 'birthDate', header: 'Tgl Lahir' },
       { key: 'phone', header: 'No. Telepon' },
@@ -880,9 +881,9 @@ export function AllPatientsModule({
                   </td>
                 </tr>
               ) : (
-                filteredPatients.map((patient) => {
+                filteredPatients.slice(patientPage * 50, patientPage * 50 + 50).map((patient) => {
                   const st = patientStatsMap.get(patient.id);
-                  const age = calculateAgeYears(patient.birthDate);
+                  const age = calculateAgeYears(patient.birthDate) ?? '—';
                   return (
                     <tr
                       key={patient.id}
@@ -1015,11 +1016,11 @@ export function AllPatientsModule({
         </div>
         <div className="px-4 py-3 border-t border-[#E2ECE8] dark:border-[#183831] bg-[#F8FBFA] dark:bg-[#081916] flex flex-wrap items-center justify-between gap-2 text-xs text-[#52736B] dark:text-[#86B5A9]">
           <span>
-            Menampilkan <strong>{filteredPatients.length}</strong> dari total{' '}
-            <strong>{patients.length}</strong> pasien terdaftar di {activeFacility.name}
+            Menampilkan {Math.min(filteredPatients.length, patientPage * 50 + 1)}–{Math.min(filteredPatients.length, patientPage * 50 + 50)} dari <strong>{filteredPatients.length}</strong>
           </span>
-          <span className="font-mono text-caption">
-            Data pasien fasilitas
+          <span className="inline-flex gap-2">
+            <button type="button" disabled={patientPage === 0} onClick={() => setPatientPage((page) => Math.max(0, page - 1))} className="rounded border px-2 py-1 disabled:opacity-40">Sebelumnya</button>
+            <button type="button" disabled={(patientPage + 1) * 50 >= filteredPatients.length} onClick={() => setPatientPage((page) => page + 1)} className="rounded border px-2 py-1 disabled:opacity-40">Berikutnya</button>
           </span>
         </div>
       </div>

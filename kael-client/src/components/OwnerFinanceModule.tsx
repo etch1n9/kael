@@ -16,9 +16,12 @@ import {
   calculateFinancialSummary,
   formatRupiah,
   getInvoiceOutstanding,
+  isBpjsRecord,
 } from '../domain/clinicalLogic.ts';
 import { computeErpCompleteFinancialAnalysis } from '../domain/platformEngine.ts';
+import { activeGuarantors } from '../utils/facilityMasters.ts';
 import { DataExportToolbar } from './DataExportToolbar';
+import { PageBar, usePage } from './PageBar';
 import { KpiSparklineCanvas } from './KpiSparklineChart';
 import { ExportColumn } from '../utils/exportDocument';
 
@@ -147,7 +150,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
     return rawInvoices.filter((inv) => {
       if (claimStatusFilter === 'PENDING_ONLY' && inv.status === 'LUNAS') return false;
       if (claimStatusFilter === 'LUNAS_ONLY' && inv.status !== 'LUNAS') return false;
-      if (guarantorFilter !== 'ALL' && inv.guarantor !== guarantorFilter) return false;
+      if (guarantorFilter !== 'ALL' && (guarantorFilter === 'BPJS' ? !isBpjsRecord(inv) : inv.guarantor !== guarantorFilter)) return false;
       if (q) {
         const hay = `${inv.invoiceNumber} ${inv.patientName} ${inv.mrNumber} ${inv.guarantor}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -155,6 +158,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
       return true;
     });
   }, [rawInvoices, claimStatusFilter, guarantorFilter, searchQuery]);
+  const claimPage = usePage(filteredClaims);
 
   const facilityComparison = useMemo(() => {
     const allEntries =
@@ -193,7 +197,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
     return { doctor, visitCount: visits.length, invoiceCount: invoices.length, medicalServiceRevenue };
   }), [workspace.doctors, workspace.visits, workspace.invoices]);
 
-  const localBpjsInvoices = rawInvoices.filter((invoice) => invoice.guarantor === 'BPJS_KESEHATAN');
+  const localBpjsInvoices = rawInvoices.filter((invoice) => isBpjsRecord(invoice));
   const outstandingInvoices = rawInvoices.filter((invoice) => invoice.status !== 'LUNAS' && invoice.pricingStatus !== 'PENDING');
   const canRead = (collection: string) => workspace.dataAccess?.[collection] !== false;
   const ledgerEmptyState = canRead('accountingEntries') ? 'Belum ada transaksi' : 'Data transaksi tidak tersedia untuk akses akun ini';
@@ -862,9 +866,10 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                 className="px-3 py-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] font-medium"
               >
                 <option value="ALL">Semua Penjamin</option>
-                <option value="BPJS_KESEHATAN">BPJS Kesehatan</option>
-                <option value="UMUM">Pasien Umum</option>
-                <option value="ASURANSI_SWASTA">Asuransi Swasta</option>
+                <option value="BPJS">Semua penjamin BPJS</option>
+                {activeGuarantors(workspace.activeFacilityConfig).map((payer) => (
+                  <option key={payer.code} value={payer.code}>{payer.name}</option>
+                ))}
               </select>
 
               <DataExportToolbar
@@ -914,7 +919,8 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredClaims.map((inv) => {
+                  <>
+                  {claimPage.bar}{claimPage.rows.map((inv) => {
                     const effectiveAmount = inv.claimRequestedAmount ?? Math.max(0, inv.subtotal - inv.discountAmount);
                     return (
                       <tr key={inv.id} className="hover:bg-[#F3F8F6] dark:hover:bg-[#0F2B25]">
@@ -971,7 +977,8 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                         </td>
                       </tr>
                     );
-                  })
+                  })}
+                  </>
                 )}
               </tbody>
             </table>

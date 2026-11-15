@@ -26,6 +26,7 @@ import { kaelApi, WorkspacePayload } from '../utils/apiClient';
 import { evaluateLabFlag, formatRupiah } from '../domain/clinicalLogic.ts';
 import { computeErpCompleteFinancialAnalysis } from '../domain/platformEngine.ts';
 import { DataExportToolbar } from './DataExportToolbar';
+import { PageBar, usePage } from './PageBar';
 import { ModalDialog } from './ModalDialog';
 import { ExportColumn } from '../utils/exportDocument';
 
@@ -328,6 +329,12 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
       );
     });
   }, [mutations, mutationTypeFilter, mutationMedFilter, searchQuery]);
+  const orderPage = usePage(workspace.pharmacyOrders);
+  const opnamePage = usePage(stockOpnameRows);
+  const mutationPage = usePage(filteredMutations);
+  const labPage = usePage(workspace.labOrders);
+  const purchasePage = usePage(workspace.purchaseOrders || []);
+  const radiologyPage = usePage(workspace.radiologyOrders || []);
 
   const selectLabForEdit = (order: LabOrder) => {
     setSelectedLabOrder(order);
@@ -1077,7 +1084,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
           </div>
 
           <div className="min-w-0 grid grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-form-min-inline-size)),1fr))] gap-4">
-            {workspace.pharmacyOrders.map((order) => {
+            {orderPage.bar}{orderPage.rows.map((order) => {
               const isDispensed = order.status === 'DISERAHKAN';
               const totalResepValue = order.items.reduce(
                 (s, i) => s + i.quantity * i.unitPrice,
@@ -1286,7 +1293,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               </thead>
               <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
                 {stockOpnameRows.length === 0 && <tr><td colSpan={9} className="px-4 py-5 text-slate-500">Belum ada batch obat.</td></tr>}
-                {stockOpnameRows.map((row) => {
+                {opnamePage.bar}{opnamePage.rows.map((row) => {
                   const hasPhysicalCount = Object.prototype.hasOwnProperty.call(opnameDrafts, row.rowKey);
                   const hasDiff = hasPhysicalCount && row.diffQty !== 0;
                   return (
@@ -1752,7 +1759,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
-                  {filteredMutations.map((mut) => {
+                  {mutationPage.bar}{mutationPage.rows.map((mut) => {
                     const isIncoming = mut.quantityChange > 0;
                     return (
                       <tr
@@ -1932,7 +1939,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
             )}
 
             <div className="space-y-2.5">
-              {workspace.labOrders.map((order) => {
+              {labPage.bar}{labPage.rows.map((order) => {
                 const isSelected = selectedLabOrder?.id === order.id;
                 return (
                   <button
@@ -2205,7 +2212,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
-                  {(workspace.purchaseOrders || []).map((po) => (
+                  {purchasePage.bar}{purchasePage.rows.map((po) => (
                     <tr key={po.id}>
                       <td className="py-3 px-4 font-mono">
                         <div className="font-bold text-[#00897B]">{po.poNumber}</div>
@@ -2337,7 +2344,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               </h2>
             </div>
             <div className="divide-y divide-[#E2ECE8] dark:divide-[#183831] text-xs">
-              {(workspace.radiologyOrders || []).map((ro) => (
+              {radiologyPage.bar}{radiologyPage.rows.map((ro) => (
                 <div key={ro.id} className="p-4 space-y-1.5">
                   <div className="flex items-center justify-between font-mono">
                     <span className="font-bold text-[#00897B]">

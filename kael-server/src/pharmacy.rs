@@ -44,7 +44,7 @@ pub(crate) fn stock_mutation(
     counterparty: &str,
     notes: &str,
 ) {
-    array_mut(&mut app.db,"medicationMutations").insert(0,json!({"id":id("mut"),"facilityCode":ctx.facility_code,"timestamp":now(),"medicationId":med["id"],"medicationCode":med["code"],"medicationName":med["name"],"batchNumber":batch,"unit":med["unit"],"type":kind,"quantityChange":after-before,"stockBefore":before,"stockAfter":after,"unitPrice":price,"totalValue":(after-before).abs()*price,"referenceId":reference,"counterpartyOrPatient":counterparty,"actorName":ctx.user["fullName"],"notes":notes}));
+    array_mut(&mut app.db,"medicationMutations").push(json!({"id":id("mut"),"facilityCode":ctx.facility_code,"timestamp":now(),"medicationId":med["id"],"medicationCode":med["code"],"medicationName":med["name"],"batchNumber":batch,"unit":med["unit"],"type":kind,"quantityChange":after-before,"stockBefore":before,"stockAfter":after,"unitPrice":price,"totalValue":(after-before).abs()*price,"referenceId":reference,"counterpartyOrPatient":counterparty,"actorName":ctx.user["fullName"],"notes":notes}));
 }
 
 pub fn handle(
@@ -130,7 +130,7 @@ fn create(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         vec![]
     };
     let med = json!({"id":id("med"),"facilityCode":ctx.facility_code,"code":code,"kfaCode":text(body,"kfaCode").trim(),"name":text(body,"name").trim(),"genericName":text(body,"genericName").trim(),"category":text(body,"category").trim(),"form":text(body,"form").trim(),"unit":text(body,"unit").trim(),"minStock":minimum,"buyPrice":buy,"sellPrice":sell,"contraindications":array(body,"contraindications"),"interactions":array(body,"interactions"),"batches":batches});
-    array_mut(&mut app.db, "medications").insert(0, med.clone());
+    array_mut(&mut app.db, "medications").push(med.clone());
     if stock > 0.0 {
         stock_mutation(
             app,

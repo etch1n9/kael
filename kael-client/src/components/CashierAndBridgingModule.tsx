@@ -13,8 +13,10 @@ import {
 } from 'lucide-react';
 import { AccountingEntry, BillingLineItem, BridgingLog, InvoiceRecord } from '../domain/simrs.ts';
 import { kaelApi, WorkspacePayload } from '../utils/apiClient';
-import { formatRupiah } from '../domain/clinicalLogic.ts';
+import { formatRupiah, isBpjsRecord } from '../domain/clinicalLogic.ts';
+import { activeGuarantors } from '../utils/facilityMasters.ts';
 import { DataExportToolbar } from './DataExportToolbar';
+import { PageBar, usePage } from './PageBar';
 import { ExportColumn } from '../utils/exportDocument';
 import { ServiceIndicators } from './ServiceIndicators';
 
@@ -94,7 +96,7 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
     const q = invSearch.trim().toLowerCase();
     return workspace.invoices.filter((inv) => {
       if (invStatusFilter !== 'ALL' && inv.status !== invStatusFilter) return false;
-      if (invGuarantorFilter !== 'ALL' && inv.guarantor !== invGuarantorFilter) return false;
+      if (invGuarantorFilter !== 'ALL' && (invGuarantorFilter === 'BPJS' ? !isBpjsRecord(inv) : inv.guarantor !== invGuarantorFilter)) return false;
       if (q) {
         const hay = `${inv.invoiceNumber} ${inv.patientName} ${inv.mrNumber} ${inv.guarantor}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -102,6 +104,7 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
       return true;
     });
   }, [workspace.invoices, invSearch, invStatusFilter, invGuarantorFilter]);
+  const invoicePage = usePage(filteredInvoices);
 
   const handlePayInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -510,16 +513,16 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
                   className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
                 >
                   <option value="ALL">Semua Penjamin</option>
-                  <option value="BPJS_KESEHATAN">BPJS Kesehatan</option>
-                  <option value="UMUM">Pasien Umum</option>
-                  <option value="ASURANSI_SWASTA">Asuransi Swasta</option>
-                  <option value="KORPORASI">Korporasi</option>
+                  <option value="BPJS">Semua penjamin BPJS</option>
+                  {activeGuarantors(workspace.activeFacilityConfig).map((payer) => (
+                    <option key={payer.code} value={payer.code}>{payer.name}</option>
+                  ))}
                 </select>
               </div>
             </div>
 
             <div className="space-y-2.5">
-              {filteredInvoices.map((inv) => {
+              {invoicePage.bar}{invoicePage.rows.map((inv) => {
                 const isSelected = selectedInvoice?.id === inv.id;
                 const isPaid = inv.status === 'LUNAS';
                 return (

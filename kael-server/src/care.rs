@@ -12,6 +12,14 @@ fn n(value: &Value, key: &str) -> f64 {
         .or_else(|| value[key].as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(0.0)
 }
+
+fn stay_days(admitted_at: &str) -> i64 {
+    let Some(admitted) = chrono::DateTime::parse_from_rfc3339(admitted_at).ok() else {
+        return 1;
+    };
+    let elapsed = chrono::Utc::now().signed_duration_since(admitted.with_timezone(&chrono::Utc));
+    elapsed.num_days().max(1)
+}
 fn default<'a>(value: &'a Value, key: &str, fallback: &'a str) -> &'a str {
     if text(value, key).is_empty() {
         fallback
@@ -219,7 +227,7 @@ fn create_patient(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResul
         &["SUB_PATIENT_MPI"],
     )?;
     let patient = patient_data(app, ctx, body)?;
-    array_mut(&mut app.db, "patients").insert(0, patient.clone());
+    array_mut(&mut app.db, "patients").push(patient.clone());
     audit(
         app,
         ctx,
@@ -373,7 +381,7 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
             }
             is_new = true;
             let patient = patient_data(app, ctx, &incoming)?;
-            array_mut(&mut app.db, "patients").insert(0, patient.clone());
+            array_mut(&mut app.db, "patients").push(patient.clone());
             patient
         }
     } else {
@@ -386,9 +394,13 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
         )?;
         array(&app.db, "patients")[i].clone()
     };
+    let timestamp = now();
+    let day = &timestamp[..10];
     let sequence = array(&app.db, "visits")
         .iter()
-        .filter(|visit| text(visit, "facilityCode") == ctx.facility_code)
+        .filter(|visit| {
+            text(visit, "facilityCode") == ctx.facility_code && text(visit, "createdAt").starts_with(day)
+        })
         .count()
         + 1;
     let config = facility_snapshot(app, ctx);
@@ -416,7 +428,6 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
     } else {
         poli_prefix
     };
-    let timestamp = now();
     let registration = format!(
         "REG/{}/{}/{sequence:03}",
         prefix(&ctx.facility_code, 4),
@@ -434,10 +445,10 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
     }
     let doctor = doctor.unwrap_or(Value::Null);
     let visit = json!({"id":id("vis"),"facilityCode":ctx.facility_code,"queueNumber":format!("{poli_prefix}-{sequence:03}"),"registrationNumber":registration,"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"nik":patient["nik"],"gender":patient["gender"],"birthDate":patient["birthDate"],"polyclinic":poli,"doctorId":text(&doctor,"id"),"doctorName":text(&doctor,"fullName"),"guarantor":guarantor,"guarantorSettlement":settlement,"bpjsSepOrPcareNo":if settlement=="BPJS"{body["bpjsSepOrPcareNo"].clone()}else{Value::Null},"triageLevel":auto_triage(&vital_signs),"status":"MENUNGGU","vitals":vital_signs,"chiefComplaint":text(body,"chiefComplaint").trim(),"createdAt":timestamp,"updatedAt":timestamp});
-    array_mut(&mut app.db, "visits").insert(0, visit.clone());
+    array_mut(&mut app.db, "visits").push(visit.clone());
     if settlement == "BPJS" {
         let emergency = text(&unit, "unitType") == "IGD";
-        array_mut(&mut app.db,"bridgingLogs").insert(0,json!({"id":id("brg"),"facilityCode":ctx.facility_code,"targetSystem":if emergency{"BPJS_VCLAIM"}else{"BPJS_PCARE"},"resourceType":if emergency{"Penerbitan SEP IGD V-Claim Otomatis"}else{"Pendaftaran Kunjungan Peserta P-Care"},"referenceId":visit["id"],"patientName":patient["fullName"],"status":"QUEUED_LOCAL","externalId":"","latencyMs":0,"payloadPreview":{"registrationNumber":registration,"noKartu":patient["bpjsNumber"],"polyclinic":poli,"keluhan":visit["chiefComplaint"],"triage":visit["triageLevel"]},"timestamp":timestamp}));
+        array_mut(&mut app.db,"bridgingLogs").push(json!({"id":id("brg"),"facilityCode":ctx.facility_code,"targetSystem":if emergency{"BPJS_VCLAIM"}else{"BPJS_PCARE"},"resourceType":if emergency{"Penerbitan SEP IGD V-Claim Otomatis"}else{"Pendaftaran Kunjungan Peserta P-Care"},"referenceId":visit["id"],"patientName":patient["fullName"],"status":"QUEUED_LOCAL","externalId":"","latencyMs":0,"payloadPreview":{"registrationNumber":registration,"noKartu":patient["bpjsNumber"],"polyclinic":poli,"keluhan":visit["chiefComplaint"],"triage":visit["triageLevel"]},"timestamp":timestamp}));
     }
     audit(
         app,
@@ -615,6 +626,22 @@ fn bed_action(
             bed["diagnosis"] = json!(text(body, "diagnosis"));
         }
         "discharge" => {
+            let admitted = text(&bed, "admittedAt").to_owned();
+            let days = stay_days(&admitted).max(1);
+            crate::finance::append_service_charge(
+                app,
+                ctx,
+                "",
+                text(&bed, "patientId"),
+                text(&bed, "patientName"),
+                text(&bed, "mrNumber"),
+                "UMUM",
+                "PATIENT",
+                "KAMAR_INAP",
+                &format!("Kamar {} / {} ({} hari)", text(&bed, "roomNumber"), text(&bed, "bedClass"), days),
+                days as f64,
+                n(&bed, "dailyRate"),
+            );
             bed["status"] = json!("TERSEDIA");
             clear_bed(&mut bed);
         }
@@ -732,7 +759,7 @@ fn create_lab(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         "PERMINTAAN_BARU",
     );
     order["billingStatus"] = json!("NOT_BILLED");
-    array_mut(&mut app.db, "labOrders").insert(0, order.clone());
+    array_mut(&mut app.db, "labOrders").push(order.clone());
     audit(
         app,
         ctx,
@@ -977,7 +1004,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if let Some(i) = si {
         array_mut(&mut app.db, "soapRecords")[i] = record.clone();
     } else {
-        array_mut(&mut app.db, "soapRecords").insert(0, record.clone());
+        array_mut(&mut app.db, "soapRecords").push(record.clone());
     }
     if text(&record, "recordStatus") == "ADDENDUM_APPENDED"
         || prior_invoice
@@ -1030,7 +1057,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             }
         }
     } else if !prescriptions.is_empty() {
-        array_mut(&mut app.db,"pharmacyOrders").insert(0,json!({"id":id("pho"),"facilityCode":ctx.facility_code,"visitId":visit["id"],"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"doctorName":record["doctorName"],"allergies":patient["allergies"],"items":prescriptions,"status":"ANTRIAN_RESEP","dispensedBatches":[],"createdAt":timestamp}));
+        array_mut(&mut app.db,"pharmacyOrders").push(json!({"id":id("pho"),"facilityCode":ctx.facility_code,"visitId":visit["id"],"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"doctorName":record["doctorName"],"allergies":patient["allergies"],"items":prescriptions,"status":"ANTRIAN_RESEP","dispensedBatches":[],"createdAt":timestamp}));
     }
     let li = array(&app.db, "labOrders").iter().position(|order| {
         text(order, "visitId") == text(&visit, "id")
@@ -1061,7 +1088,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             text(&record["assessment"], "primaryIcd10Name")
         );
         let order = lab_record(ctx, &visit, lab_params.clone(), &notes, "PERMINTAAN_BARU");
-        array_mut(&mut app.db, "labOrders").insert(0, order);
+        array_mut(&mut app.db, "labOrders").push(order);
     }
     let mut items = vec![];
     let mut unpriced_items = vec![];
@@ -1152,10 +1179,18 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         .map(|invoice| text(invoice, "invoiceNumber").to_owned())
         .unwrap_or_else(|| {
             format!(
-                "INV/{}/{}/{:03}",
+                "INV/{}/{}/{:04}",
                 prefix(&ctx.facility_code, 4),
                 timestamp[..10].replace('-', ""),
-                array(&app.db, "invoices").len() + 1
+                crate::http::next_document(
+                    array(&app.db, "invoices"),
+                    "invoiceNumber",
+                    &format!(
+                        "INV/{}/{}/",
+                        prefix(&ctx.facility_code, 4),
+                        timestamp[..10].replace('-', "")
+                    ),
+                )
             )
         });
     let mut invoice = json!({"id":prior_invoice.as_ref().map(|row|row["id"].clone()).unwrap_or_else(||json!(id("inv"))),"facilityCode":ctx.facility_code,"invoiceNumber":invoice_number,"visitId":visit["id"],"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"guarantor":visit["guarantor"],"guarantorSettlement":if bpjs {json!("BPJS")} else {json!("PATIENT")},"items":items,"unpricedItems":unpriced_items,"pricingStatus":if unpriced_items.is_empty(){"COMPLETE"}else{"PENDING"},"subtotal":totals["subtotal"],"discountAmount":totals["discountAmount"],"bpjsCoveredAmount":totals["bpjsCoveredAmount"],"patientPayableAmount":totals["patientPayableAmount"],"paymentMethod":Value::Null,"status":"BELUM_LUNAS","createdAt":prior_invoice.as_ref().map(|row|row["createdAt"].clone()).unwrap_or_else(||json!(timestamp))});
@@ -1178,10 +1213,10 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if let Some(i) = ii {
         array_mut(&mut app.db, "invoices")[i] = invoice.clone();
     } else {
-        array_mut(&mut app.db, "invoices").insert(0, invoice.clone());
+        array_mut(&mut app.db, "invoices").push(invoice.clone());
     }
     array_mut(&mut app.db, "visits")[vi] = visit.clone();
-    array_mut(&mut app.db,"bridgingLogs").insert(0,json!({"id":id("brg-ss"),"facilityCode":ctx.facility_code,"targetSystem":"SATUSEHAT_FHIR_R4","resourceType":"Bundle (Encounter, Condition ICD-10, Observation Vitals, MedicationRequest)","referenceId":visit["id"],"patientName":patient["fullName"],"status":"QUEUED_LOCAL","externalId":"","latencyMs":0,"payloadPreview":{"resourceType":"Bundle","type":"transaction","localVisitId":visit["id"],"patientIhs":patient["ihsNumber"],"practitionerName":record["doctorName"],"icd10Primary":record["assessment"]["primaryIcd10Code"],"icd10Display":record["assessment"]["primaryIcd10Name"],"vitals":vital_signs,"prescriptionCount":array(&record["plan"],"prescriptions").len()},"timestamp":timestamp}));
+    array_mut(&mut app.db,"bridgingLogs").push(json!({"id":id("brg-ss"),"facilityCode":ctx.facility_code,"targetSystem":"SATUSEHAT_FHIR_R4","resourceType":"Bundle (Encounter, Condition ICD-10, Observation Vitals, MedicationRequest)","referenceId":visit["id"],"patientName":patient["fullName"],"status":"QUEUED_LOCAL","externalId":"","latencyMs":0,"payloadPreview":{"resourceType":"Bundle","type":"transaction","localVisitId":visit["id"],"patientIhs":patient["ihsNumber"],"practitionerName":record["doctorName"],"icd10Primary":record["assessment"]["primaryIcd10Code"],"icd10Display":record["assessment"]["primaryIcd10Name"],"vitals":vital_signs,"prescriptionCount":array(&record["plan"],"prescriptions").len()},"timestamp":timestamp}));
     audit(
         app,
         ctx,

@@ -82,9 +82,11 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
   const [subTab, setSubTab] = useState<
     'USERS' | 'ROLES' | 'FACILITIES' | 'MASTERS' | 'CAPABILITY_CONFIG' | 'SERVER_AUDIT'
   >('USERS');
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
-    null
-  );
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [evidenceType, setEvidenceType] = useState('SIP_NAKES');
+  const [evidenceNumber, setEvidenceNumber] = useState('');
+  const [evidenceHolder, setEvidenceHolder] = useState('');
+  const [evidenceUntil, setEvidenceUntil] = useState('');
   const feedbackRef = useRef<HTMLDivElement | null>(null);
   const userFormRef = useRef<HTMLDetailsElement>(null);
   const roleFormRef = useRef<HTMLDetailsElement>(null);
@@ -153,6 +155,8 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
   const [editNipOrSip, setEditNipOrSip] = useState('');
   const [editEmail, setEditEmail] = useState('');
   const [editIsPractitioner, setEditIsPractitioner] = useState(false);
+  const [editSpecialization, setEditSpecialization] = useState('');
+  const [editDutyUnits, setEditDutyUnits] = useState<string[]>([]);
   const [isSavingUser, setIsSavingUser] = useState(false);
   const [restoringUserId, setRestoringUserId] = useState<string | null>(null);
 
@@ -359,6 +363,8 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
           fullName: editFullName.trim(),
           nipOrSip: editNipOrSip.trim(),
           email: editEmail.trim(),
+          specialization: editSpecialization.trim(),
+          polyclinics: editDutyUnits,
           isPractitioner: editIsPractitioner,
           role: editUserRole,
           allowedFacilities: editUserRole === 'SUPERUSER' ? ['*'] : editUserFacilities,
@@ -641,11 +647,11 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
       : subTab === 'SERVER_AUDIT'
       ? [
           { key: 'timestamp', header: 'Waktu' },
-          { key: 'actorName', header: 'Pengguna' },
+          { key: 'actorUsername', header: 'Pengguna' },
           { key: 'actorRole', header: 'Role' },
           { key: 'facilityCode', header: 'Fasilitas' },
           { key: 'action', header: 'Aksi' },
-          { key: 'detail', header: 'Detail Audit' },
+          { key: 'details', header: 'Detail Audit' },
         ]
       : [
           { key: 'username', header: 'Username' },
@@ -1134,6 +1140,21 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
                   <label className="block font-semibold">Email
                     <input type="email" value={editEmail} onChange={(event) => setEditEmail(event.target.value)} className="mt-1 w-full px-2.5 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900" />
                   </label>
+                  <label className="block font-semibold">Spesialisasi
+                  <input value={editSpecialization} onChange={(event) => setEditSpecialization(event.target.value)} className="mt-1 w-full px-2.5 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900" />
+                </label>
+                <fieldset className="block font-semibold sm:col-span-2">
+                  <legend>Unit tugas (opsional)</legend>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {dutyUnitChoices.map((unit) => (
+                      <label key={unit.unitCode} className="inline-flex items-center gap-1 font-normal">
+                        <input type="checkbox" checked={editDutyUnits.includes(unit.unitCode)} onChange={() => setEditDutyUnits((current) => current.includes(unit.unitCode) ? current.filter((code) => code !== unit.unitCode) : [...current, unit.unitCode])} />
+                        {unit.unitName}
+                      </label>
+                    ))}
+                    {dutyUnitChoices.length === 0 && <span className="font-normal text-slate-500">Belum ada unit tujuan.</span>}
+                  </div>
+                </fieldset>
                 </div>
                 <div>
                   <label className="flex items-center gap-2 font-semibold">
@@ -1281,6 +1302,8 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
                                 setEditNipOrSip(u.nipOrSip);
                                 setEditEmail(u.email);
                                 setEditIsPractitioner(u.isPractitioner === true);
+                                setEditSpecialization(u.specialization || '');
+                                setEditDutyUnits(u.polyclinics?.length ? [...u.polyclinics] : u.polyclinic ? [u.polyclinic] : []);
                                 setEditUserRole(u.role);
                                 setEditUserFacilities(
                                   u.allowedFacilities.includes('*')
@@ -1407,6 +1430,25 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             </div>
           </div>
 
+          <form className="mb-4 grid gap-2 rounded-xl border border-slate-200 p-3 text-xs dark:border-slate-800 md:grid-cols-5" onSubmit={async (event) => {
+            event.preventDefault();
+            try {
+              await kaelApi.registerEvidence(token, facilityCode, { evidenceType, documentNumber: evidenceNumber, holderName: evidenceHolder, validUntil: evidenceUntil });
+              setEvidenceNumber('');
+              await onRefreshWorkspace();
+              setFeedback({ type: 'success', text: 'Bukti fasilitas tersimpan dan terverifikasi.' });
+            } catch (err) {
+              setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Bukti belum tersimpan.' });
+            }
+          }}>
+            <select value={evidenceType} onChange={(event) => setEvidenceType(event.target.value)} className="rounded border px-2 py-1.5">
+              {['SIP_NAKES', 'IZIN_OPERASIONAL', 'KALIBRASI_ALKES', 'MOU_PIHAK_KETIGA', 'IZIN_BAPETEN_RADIOLOGI'].map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+            </select>
+            <input required value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="Nomor dokumen" className="rounded border px-2 py-1.5" />
+            <input required value={evidenceHolder} onChange={(event) => setEvidenceHolder(event.target.value)} placeholder="Pemegang / penerbit" className="rounded border px-2 py-1.5" />
+            <input required type="date" value={evidenceUntil} onChange={(event) => setEvidenceUntil(event.target.value)} className="rounded border px-2 py-1.5" />
+            <button type="submit" className="rounded bg-teal-700 px-3 py-1.5 font-semibold text-white">Simpan bukti</button>
+          </form>
           <div className="grid min-w-0 [&>*]:min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-form-min-inline-size)),1fr))] gap-5 items-start">
             {/* Left 8 Cols: 3-Dimensional Sub-Capability Matrix */}
             <div className="min-w-0 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">

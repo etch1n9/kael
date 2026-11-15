@@ -161,13 +161,23 @@ pub fn auto_triage(vitals: &Value) -> String {
     code.into()
 }
 
+pub fn rupiah(value: f64) -> f64 {
+    if value.is_finite() { value.round() } else { 0.0 }
+}
+
+pub fn measure(value: f64) -> f64 {
+    if value.is_finite() { (value * 1000.0).round() / 1000.0 } else { 0.0 }
+}
+
 pub fn invoice_totals(items: &[Value], bpjs: bool, discount: f64) -> Value {
-    let subtotal: f64 = items
-        .iter()
-        .map(|item| number(item, "quantity") * number(item, "unitPrice"))
-        .sum();
-    let discount = discount.min(subtotal).max(0.0);
-    let net = subtotal - discount;
+    let subtotal = rupiah(
+        items
+            .iter()
+            .map(|item| number(item, "quantity") * number(item, "unitPrice"))
+            .sum(),
+    );
+    let discount = rupiah(discount.min(subtotal).max(0.0));
+    let net = rupiah(subtotal - discount);
     json!({"subtotal":subtotal,"discountAmount":discount,"bpjsCoveredAmount":0,"claimRequestedAmount":if bpjs {net} else {0.0},
         "patientPayableAmount":if bpjs {0.0} else {net}})
 }
@@ -213,9 +223,9 @@ pub fn fefo(batches: &[Value], quantity: f64) -> Result<(Vec<Value>, Vec<Value>)
         if stock <= 0.0 {
             continue;
         }
-        let take = stock.min(remaining);
-        batch["stock"] = json!(stock - take);
-        remaining -= take;
+        let take = measure(stock.min(remaining));
+        batch["stock"] = json!(measure(stock - take));
+        remaining = measure(remaining - take);
         allocations.push(json!({"batchNumber":text(batch,"batchNumber"),"quantity":take}));
     }
     if remaining > 0.0 {

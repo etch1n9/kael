@@ -1,7 +1,6 @@
 use crate::{config::Config, domain::MODULE_KEYS, storage::Storage};
 use scrypt::{Params, scrypt};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     io::{self, IsTerminal, Write},
@@ -23,11 +22,7 @@ pub fn hash_password(password: &str) -> Result<String, String> {
 
 pub fn verify_password(password: &str, stored: &str) -> bool {
     if !stored.starts_with("scrypt:") {
-        let Some(expected) = decode_hex(stored).filter(|bytes| bytes.len() == 32) else {
-            return false;
-        };
-        let digest = Sha256::digest(format!("kael_simrs_salt_v1:{password}").as_bytes());
-        return constant_equal(&digest, &expected);
+        return false;
     }
     let parts: Vec<_> = stored.split(':').collect();
     if parts.len() != 3 {
@@ -155,6 +150,9 @@ pub fn run(config: &Config) -> Result<(), String> {
         "bridgingLogs",
         "auditLogs",
         "idempotencyRecords",
+        "attendance",
+        "leaveRequests",
+        "payrollRuns",
     ] {
         db[key] = Value::Array(Vec::new());
     }

@@ -37,6 +37,7 @@ import { ModalDialog } from './ModalDialog';
 import { blankVitals, hasCompleteVitals } from '../utils/vitalSigns';
 import { activeBedClasses, activeGuarantors, unitLabel, visitUnits } from '../utils/facilityMasters';
 import { VitalSignsFields } from './VitalSignsFields';
+import { PageBar, usePage } from './PageBar';
 import { ExportColumn } from '../utils/exportDocument';
 
 interface RegistrationAndBedsModuleProps {
@@ -293,6 +294,9 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
       return true;
     });
   }, [beds, bedSearch, bedClassFilter, bedStatusFilter]);
+  const visitPage = usePage(filteredVisits);
+  const patientPage = usePage(filteredPatients);
+  const bedPage = usePage(filteredBeds);
 
   const vitalsComplete = hasCompleteVitals(vitals);
   const liveTriage = useMemo(() => vitalsComplete ? evaluateAutoTriage(vitals) : 'BELUM_DIISI', [vitals, vitalsComplete]);
@@ -1494,7 +1498,8 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                         </td>
                       </tr>
                     ) : (
-                      filteredVisits.map((v) => (
+                      <>
+                      {visitPage.bar}{visitPage.rows.map((v) => (
                         <tr
                           key={v.id}
                           className="hover:bg-emerald-50/40 dark:hover:bg-slate-800/40 transition-colors"
@@ -1512,7 +1517,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                               {v.patientName}
                             </div>
                             <div className="text-caption font-mono text-slate-500">
-                              {v.mrNumber} · {calculatePatientAge(v.birthDate)} thn ({v.gender})
+                              {v.mrNumber} · {calculatePatientAge(v.birthDate) ?? '—'} thn ({v.gender})
                             </div>
                           </td>
                           <td className="py-3 px-2.5">
@@ -1582,7 +1587,8 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                             </div>
                           </td>
                         </tr>
-                      ))
+                      ))}
+                      </>
                     )}
                   </tbody>
                 </table>
@@ -1925,7 +1931,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                  {filteredPatients.map((p) => (
+                  {patientPage.bar}{patientPage.rows.map((p) => (
                     <tr
                       key={p.id}
                       className="hover:bg-emerald-50/30 dark:hover:bg-slate-800/40 transition-colors"
@@ -1941,7 +1947,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                           {p.fullName}
                         </div>
                         <div className="text-caption text-slate-500">
-                          {calculatePatientAge(p.birthDate)} thn · Gol. {p.bloodType}
+                          {calculatePatientAge(p.birthDate) ?? '—'} thn · Gol. {p.bloodType}
                           {p.rhesus} · {p.address}
                         </div>
                       </td>
@@ -2296,7 +2302,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
           )}
 
           <div className="grid min-w-0 [&>*]:min-w-0 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredBeds.map((bed) => (
+            {bedPage.bar}{bedPage.rows.map((bed) => (
               <div
                 key={bed.id}
                 className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between"

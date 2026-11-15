@@ -125,6 +125,9 @@ export interface WorkspacePayload {
   doubleEntryJournals?: DoubleEntryJournal[];
   bridgingLogs: BridgingLog[];
   auditLogs: AuditLogEntry[];
+  attendance?: { id: string; staffName: string; note: string; date: string; amount: number; createdAt: string }[];
+  leaveRequests?: { id: string; staffName: string; note: string; date: string; amount: number; createdAt: string }[];
+  payrollRuns?: { id: string; staffName: string; note: string; date: string; amount: number; createdAt: string }[];
   allUsers: UserAccount[];
   deletedUsers?: UserAccount[];
   allFacilities: Facility[];
@@ -246,7 +249,7 @@ export const kaelApi = {
     ),
 
   fetchWorkspace: (token: string, facilityCode: string, signal?: AbortSignal) =>
-    requestJson<WorkspacePayload>('/workspace', { method: 'GET', signal }, token, facilityCode),
+    requestJson<WorkspacePayload>('/workspace?limit=500', { method: 'GET', signal }, token, facilityCode),
 
   createPatient: (token: string, facilityCode: string, payload: Partial<Patient>) =>
     requestJson<Patient>(
@@ -736,6 +739,22 @@ export const kaelApi = {
       token,
       facilityCode
     ),
+
+  registerEvidence: (token: string, facilityCode: string, payload: { evidenceType: string; documentNumber: string; holderName: string; validUntil: string }) =>
+    requestJson<Record<string, unknown>>('/evidence', { method: 'POST', body: JSON.stringify(payload) }, token, facilityCode),
+
+  scheduleSurgery: (token: string, facilityCode: string, payload: { procedureName: string; scheduledStart: string; patientName: string; mrNumber: string; operatingRoomCode: string; surgeonName: string; icd9CmCode?: string }) =>
+    requestJson<Record<string, unknown>>('/surgical-schedules', { method: 'POST', body: JSON.stringify(payload) }, token, facilityCode),
+
+  recordStaff: (
+    token: string,
+    facilityCode: string,
+    kind: 'attendance' | 'leave' | 'payroll',
+    payload: { staffName: string; note?: string; date?: string; amount?: number }
+  ) => requestJson<Record<string, unknown>>(`/staff/${kind === 'leave' ? 'leave' : kind === 'payroll' ? 'payroll' : 'attendance'}`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }, token, facilityCode),
 
   superuserDeleteUser: (token: string, facilityCode: string, userId: string) =>
     requestJson<void>(`/superuser/users/${encodeURIComponent(userId)}`, { method: 'DELETE' }, token, facilityCode),

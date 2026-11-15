@@ -17,6 +17,27 @@ export const UNIT_DESTINATION_CHOICES = [
   'Laboratorium',
 ] as const;
 
+export const UNIT_TYPE_CHOICES: { code: FacilityUnitConfig['unitType']; label: string }[] = [
+  { code: 'RUANG_PRAKTIK', label: 'Ruang praktik / poli' },
+  { code: 'POLIKLINIK_SPESIALIS', label: 'Poliklinik spesialis' },
+  { code: 'IGD', label: 'IGD' },
+  { code: 'LABORATORIUM', label: 'Laboratorium' },
+  { code: 'RADIOLOGI', label: 'Radiologi' },
+  { code: 'BANGSAL_RANAP', label: 'Bangsal rawat inap' },
+  { code: 'KAMAR_OPERASI', label: 'Kamar operasi' },
+  { code: 'HEMODIALISIS', label: 'Hemodialisis' },
+  { code: 'DEPO_FARMASI', label: 'Depo farmasi' },
+  { code: 'INSTALASI_PENDUKUNG', label: 'Instalasi pendukung' },
+];
+
+export function unitTypeForDestination(name: string): FacilityUnitConfig['unitType'] {
+  const normalized = name.trim().toLowerCase();
+  if (normalized === 'igd') return 'IGD';
+  if (normalized === 'laboratorium') return 'LABORATORIUM';
+  if (normalized === 'poli umum' || normalized === 'kia') return 'RUANG_PRAKTIK';
+  return 'POLIKLINIK_SPESIALIS';
+}
+
 export function masterCode(name: string): string {
   return name
     .trim()

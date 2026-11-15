@@ -75,12 +75,15 @@ export function calculateMAP(systolic: number, diastolic: number): number {
 }
 
 
-export function calculatePatientAge(birthDate: string): number {
-  if (!birthDate) return 30;
-  const birthYear = Number(birthDate.slice(0, 4));
-  if (Number.isNaN(birthYear) || birthYear < 1900) return 30;
-  const currentYear = new Date().getFullYear();
-  return Math.max(0, currentYear - birthYear);
+export function calculatePatientAge(birthDate: string): number | null {
+  if (!birthDate) return null;
+  const birth = new Date(`${birthDate.slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(birth.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - birth.getFullYear();
+  const month = now.getMonth() - birth.getMonth();
+  if (month < 0 || (month === 0 && now.getDate() < birth.getDate())) age -= 1;
+  return age < 0 || age > 130 ? null : age;
 }
 
 
@@ -253,9 +256,13 @@ export function checkClinicalSafetyAlerts(
 }
 
 
+export function isBpjsRecord(record?: { guarantor?: string; guarantorSettlement?: string } | null): boolean {
+  return record?.guarantorSettlement === 'BPJS' || record?.guarantor === 'BPJS_KESEHATAN' || Boolean(record?.guarantor?.startsWith('BPJS'));
+}
+
 export function calculateInvoiceTotals(
   items: BillingLineItem[],
-  guarantor: 'UMUM' | 'BPJS_KESEHATAN' | 'ASURANSI_SWASTA' | 'KORPORASI',
+  guarantor: string,
   discountAmount = 0
 ): {
   subtotal: number;
@@ -267,7 +274,7 @@ export function calculateInvoiceTotals(
   const clampedDiscount = Math.max(0, Math.min(subtotal, discountAmount));
   const netAfterDiscount = subtotal - clampedDiscount;
 
-  if (guarantor === 'BPJS_KESEHATAN') {
+  if (isBpjsRecord({ guarantor })) {
     return {
       subtotal,
       discountAmount: clampedDiscount,
@@ -568,7 +575,7 @@ export function findMatchingPatients(
 export function getInvoiceOutstanding(invoice: InvoiceRecord): number {
   if (invoice.pricingStatus === 'PENDING' || invoice.status === 'LUNAS') return 0;
   const net = Math.max(0, invoice.subtotal - invoice.discountAmount - (invoice.depositAppliedAmount || 0));
-  const billed = invoice.guarantor === 'BPJS_KESEHATAN'
+  const billed = isBpjsRecord(invoice)
     ? invoice.claimRequestedAmount ?? net
     : invoice.patientPayableAmount;
   return Number.isFinite(billed) ? Math.max(0, billed - (invoice.totalReceivedAmount || 0)) : 0;

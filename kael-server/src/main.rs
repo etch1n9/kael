@@ -46,16 +46,21 @@ async fn run() -> Result<(), String> {
                 error.to_string()
             }
         })?;
+    let mut sessions = HashMap::new();
+    for (token, user_id, facility_code, expires_at) in store.load_sessions()? {
+        sessions.insert(token, http::Session { user_id, facility_code, expires_at });
+    }
+    let shared_config = config.clone();
     let app = http::App {
         config,
         store,
-        saved_state: db.clone(),
         db,
-        sessions: HashMap::new(),
+        sessions,
+        login_failures: HashMap::new(),
     };
     let router = axum::Router::new()
         .fallback(http::serve)
-        .with_state(Arc::new(Mutex::new(app)));
+        .with_state(Arc::new(http::Shared { app: Mutex::new(app), config: shared_config }));
     println!(
         "KAEL mendengarkan di {}",
         listener.local_addr().map_err(|error| error.to_string())?

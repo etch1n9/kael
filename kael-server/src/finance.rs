@@ -1,7 +1,7 @@
 use crate::domain::invoice_totals;
 use crate::http::{
     ApiResult, App, RequestContext, array, array_mut, audit, bad_request, conflict, id,
-    json_response, not_found, now, require_service, save, text,
+    json_response, next_document, not_found, now, require_service, save, text,
 };
 use serde_json::{Value, json};
 
@@ -41,7 +41,72 @@ pub fn accounting_entry(
     reference: &str,
 ) -> Value {
     let timestamp = now();
-    json!({"id":id("acc"),"facilityCode":ctx.facility_code,"entryNumber":format!("JRN/{}/{}/{}",ctx.facility_code.chars().take(4).collect::<String>(),timestamp[..10].replace('-',""),array(&app.db,"accountingEntries").len()+1),"timestamp":timestamp,"accountCode":account_code,"accountName":account_name,"type":kind,"category":category,"description":description,"amount":amount,"referenceId":reference})
+    let day = timestamp[..10].replace('-', "");
+    let head = format!(
+        "JRN/{}/{}/",
+        ctx.facility_code.chars().take(4).collect::<String>(),
+        day
+    );
+    let sequence = next_document(array(&app.db, "accountingEntries"), "entryNumber", &head);
+    json!({"id":id("acc"),"facilityCode":ctx.facility_code,"entryNumber":format!("{head}{sequence:04}"),"timestamp":timestamp,"accountCode":account_code,"accountName":account_name,"type":kind,"category":category,"description":description,"amount":amount.round(),"referenceId":reference})
+}
+
+pub fn record_books(app: &mut App, ctx: &RequestContext, entry: &Value) {
+    array_mut(&mut app.db, "accountingEntries").push(entry.clone());
+    let amount = number(entry, "amount").round();
+    let income = text(entry, "type") == "PENDAPATAN";
+    let (debit_code, debit_name, credit_code, credit_name) = if income {
+        ("1-1100", "Kas dan setara kas", text(entry, "accountCode"), text(entry, "accountName"))
+    } else {
+        (text(entry, "accountCode"), text(entry, "accountName"), "1-1100", "Kas dan setara kas")
+    };
+    let timestamp = text(entry, "timestamp");
+    let day = if timestamp.len() >= 10 { timestamp[..10].replace('-', "") } else { "00000000".into() };
+    let head = format!("GL/{}/{}/", ctx.facility_code.chars().take(4).collect::<String>(), day);
+    let sequence = next_document(array(&app.db, "doubleEntryJournals"), "journalNumber", &head);
+    let journal = json!({"id":id("gl"),"facilityCode":ctx.facility_code,"journalNumber":format!("{head}{sequence:04}"),"timestamp":timestamp,"eventType":text(entry,"type"),"sourceTransactionId":text(entry,"referenceId"),"description":text(entry,"description"),"lines":[{"accountCode":debit_code,"accountName":debit_name,"debit":amount,"credit":0},{"accountCode":credit_code,"accountName":credit_name,"debit":0,"credit":amount}],"totalDebit":amount,"totalCredit":amount,"isBalanced":amount>0.0,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
+    array_mut(&mut app.db, "doubleEntryJournals").push(journal);
+}
+
+pub fn append_service_charge(
+    app: &mut App,
+    ctx: &RequestContext,
+    visit_id: &str,
+    patient_id: &str,
+    patient_name: &str,
+    mr_number: &str,
+    guarantor: &str,
+    settlement: &str,
+    category: &str,
+    description: &str,
+    quantity: f64,
+    unit_price: f64,
+) {
+    if patient_id.is_empty() || !unit_price.is_finite() || unit_price < 0.0 {
+        return;
+    }
+    let quantity = if quantity.is_finite() && quantity > 0.0 { quantity } else { 1.0 };
+    let unit_price = unit_price.round();
+    let item = json!({"id":id("bli"),"category":category,"description":description,"quantity":quantity,"unitPrice":unit_price,"subtotal":(quantity * unit_price).round()});
+    if let Some(index) = array(&app.db, "invoices").iter().position(|invoice| {
+        text(invoice, "facilityCode") == ctx.facility_code
+            && text(invoice, "patientId") == patient_id
+            && (visit_id.is_empty() || text(invoice, "visitId") == visit_id)
+            && text(invoice, "status") == "BELUM_LUNAS"
+    }) {
+        let mut invoice = array(&app.db, "invoices")[index].clone();
+        let discount = number(&invoice, "discountAmount");
+        array_mut(&mut invoice, "items").push(item);
+        recalculate(&mut invoice, discount);
+        array_mut(&mut app.db, "invoices")[index] = invoice;
+        return;
+    }
+    let timestamp = now();
+    let head = format!("INV/{}/{}/", ctx.facility_code.chars().take(4).collect::<String>(), timestamp[..10].replace('-', ""));
+    let sequence = next_document(array(&app.db, "invoices"), "invoiceNumber", &head);
+    let mut invoice = json!({"id":id("inv"),"facilityCode":ctx.facility_code,"invoiceNumber":format!("{head}{sequence:04}"),"visitId":visit_id,"patientId":patient_id,"patientName":patient_name,"mrNumber":mr_number,"guarantor":guarantor,"guarantorSettlement":if settlement == "BPJS" {"BPJS"} else {"PATIENT"},"items":[item],"unpricedItems":[],"pricingStatus":"COMPLETE","paymentMethod":Value::Null,"status":"BELUM_LUNAS","createdAt":timestamp});
+    recalculate(&mut invoice, 0.0);
+    array_mut(&mut app.db, "invoices").push(invoice);
 }
 
 pub fn handle(
@@ -185,7 +250,7 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
             revenue,
             text(&invoice, "invoiceNumber"),
         );
-        array_mut(&mut app.db, "accountingEntries").insert(0, entry);
+        record_books(app, ctx, &entry);
     }
     for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
         text(v, "id") == text(&invoice, "visitId") && text(v, "facilityCode") == ctx.facility_code
@@ -399,7 +464,7 @@ fn manual_entry(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult 
         amount,
         &reference,
     );
-    array_mut(&mut app.db, "accountingEntries").insert(0, entry.clone());
+    record_books(app, ctx, &entry);
     audit(
         app,
         ctx,
@@ -426,7 +491,7 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             "Penerimaan hanya dapat dicatat untuk klaim atau piutang yang sudah diajukan dengan tarif lengkap.",
         ));
     }
-    let bpjs = text(&invoice, "guarantor") == "BPJS_KESEHATAN";
+    let bpjs = uses_bpjs(&invoice);
     let amount = body["receivedAmount"]
         .as_f64()
         .filter(|amount| amount.is_finite() && *amount > 0.0)
@@ -481,7 +546,7 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         text(&invoice, "invoiceNumber"),
     );
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
-    array_mut(&mut app.db, "accountingEntries").insert(0, entry.clone());
+    record_books(app, ctx, &entry);
     audit(
         app,
         ctx,

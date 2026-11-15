@@ -117,7 +117,7 @@ pub fn handle(
         {
             entry["lifecycleStage"] = json!("SUPERSEDED");
         }
-        array_mut(&mut app.db, "facilityConfigs").insert(0, snapshot.clone());
+        array_mut(&mut app.db, "facilityConfigs").push(snapshot.clone());
         app.db["facilities"][facility_index]["activeConfigVersion"] = json!(version);
         audit(
             app,

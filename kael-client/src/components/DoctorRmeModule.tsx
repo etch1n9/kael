@@ -150,6 +150,9 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     'SURAT_SAKIT' | 'SURAT_SEHAT' | 'SURAT_RUJUKAN' | 'INFORMED_CONSENT' | 'SALINAN_RESEP'
   >('SURAT_SAKIT');
   const [showPatientHistory, setShowPatientHistory] = useState(false);
+  const [surgeryName, setSurgeryName] = useState('');
+  const [surgeryAt, setSurgeryAt] = useState('');
+  const [surgeryRoom, setSurgeryRoom] = useState('');
 
   // Sync form when activeVisit or initialSubView changes
   useEffect(() => {
@@ -158,8 +161,9 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     setSelectedMedId(''); setRxDosage(''); setRxSigna(''); setRxQuantity(1);
     setSelectedIcd9Code(''); setProcedureTariff('');
     setSelectedTooth(''); setSelectedToothCondition(''); setSelectedToothSurface(''); setSelectedToothNotes('');
+    const dentalUnit = workspace.activeFacilityConfig?.units?.find((unit) => unit.unitCode === activeVisit.polyclinic);
     setShowOdontogram(
-      initialSubView === 'GIGI_ODONTOGRAM' || activeVisit.polyclinic === 'POLI_GIGI'
+      initialSubView === 'GIGI_ODONTOGRAM' || /gigi/i.test(`${dentalUnit?.unitName || ''} ${activeVisit.polyclinic}`)
     );
     if (initialSubView === 'MCU_SURAT_MEDIS') {
       setShowPrintCertificate(true);
@@ -600,6 +604,24 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
 
           {initialSubView === 'BEDAH_IBS' && (
             <div className="pt-3 border-t border-[#E2ECE8] dark:border-[#183831] space-y-2 text-xs">
+              <form className="grid gap-2 md:grid-cols-4" onSubmit={async (event) => {
+                event.preventDefault();
+                await kaelApi.scheduleSurgery(token, facilityCode, {
+                  procedureName: surgeryName,
+                  scheduledStart: surgeryAt,
+                  patientName: activeVisit.patientName,
+                  mrNumber: activeVisit.mrNumber,
+                  operatingRoomCode: surgeryRoom,
+                  surgeonName: workspace.user.fullName,
+                });
+                setSurgeryName('');
+                await onRefreshWorkspace();
+              }}>
+                <input required value={surgeryName} onChange={(event) => setSurgeryName(event.target.value)} placeholder="Nama tindakan" className="rounded border px-2 py-1.5" />
+                <input required type="datetime-local" value={surgeryAt} onChange={(event) => setSurgeryAt(event.target.value)} className="rounded border px-2 py-1.5" />
+                <input required value={surgeryRoom} onChange={(event) => setSurgeryRoom(event.target.value)} placeholder="Kamar operasi" className="rounded border px-2 py-1.5" />
+                <button type="submit" className="rounded bg-[#00897B] px-3 py-1.5 font-semibold text-white">Jadwalkan</button>
+              </form>
               <div className="font-bold text-[#0F2922] dark:text-white">
                 Jadwal Operasi &amp; Status Checklist Tercatat ({(workspace.surgicalSchedules || []).length})
               </div>
