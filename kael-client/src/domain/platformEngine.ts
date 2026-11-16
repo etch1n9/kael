@@ -1198,15 +1198,43 @@ export function computeErpCompleteFinancialAnalysis(params: {
   const hasPackageValues = claims.length > 0 && claims.every((invoice) => recordedNonnegative(invoice.inacbgOrIdrgTariffAmount) !== null);
   const totalRealHospitalTariffRp = claims.reduce((sum, invoice) => sum + (recordedNonnegative(invoice.subtotal) ?? 0), 0);
   const totalPackageTariffRp = hasPackageValues ? claims.reduce((sum, invoice) => sum + invoice.inacbgOrIdrgTariffAmount!, 0) : null;
+  const mutations = params.medicationMutations || params.mutations || [];
+  const hppPharmacyCogs = mutations.reduce((sum, mutation) => {
+    const qty = mutation.quantityChange;
+    const price = mutation.unitPrice || 0;
+    const outbound = mutation.type === 'KELUAR_RESEP' || mutation.type === 'RETUR_PBF' || (mutation.type === 'PENYESUAIAN_OPNAME' && typeof qty === 'number' && qty < 0);
+    if (!outbound || !Number.isFinite(price)) return sum;
+    const units = typeof qty === 'number' ? Math.abs(qty) : 0;
+    return sum + units * price;
+  }, 0);
+  const grossProfit = totalRevenue - hppPharmacyCogs - recordedMedicalFees;
+  const grossMarginPct = recordedRatio(grossProfit, totalRevenue);
+  const journals = (params as { doubleEntryJournals?: { debitAccount?: string; creditAccount?: string; amount?: number; lines?: { accountCode?: string; debit?: number; credit?: number }[] }[] }).doubleEntryJournals;
+  const journalTotals: Record<string, number> = {};
+  for (const journal of journals || []) {
+    if (journal.lines?.length) {
+      for (const line of journal.lines) {
+        const code = line.accountCode || '';
+        if (!code) continue;
+        journalTotals[code] = (journalTotals[code] || 0) + (line.debit || 0) - (line.credit || 0);
+      }
+      continue;
+    }
+    const amount = journal.amount || 0;
+    if (journal.debitAccount) journalTotals[journal.debitAccount] = (journalTotals[journal.debitAccount] || 0) + amount;
+    if (journal.creditAccount) journalTotals[journal.creditAccount] = (journalTotals[journal.creditAccount] || 0) - amount;
+  }
+  const hasJournals = journals && journals.length > 0;
+  const ebitda = grossProfit - operatingExpenses;
   return {
-    availability: { balanceSheet: false, claimPackageComparison: hasPackageValues, inventoryTurnover: false, recordedTaxes: false, recordedDoctorTaxes: false, completeProfit: false },
+    availability: { balanceSheet: Boolean(hasJournals), claimPackageComparison: hasPackageValues, inventoryTurnover: hppPharmacyCogs > 0, recordedTaxes: false, recordedDoctorTaxes: false, completeProfit: false },
     totalRevenue, grossRevenue: totalRevenue, netRevenue: totalRevenue,
-    hppPharmacyCogs: null, cogsPharmacy: null, hppMedicalFeeDirect: recordedMedicalFees, directDoctorFeeExpense: recordedMedicalFees,
-    totalHpp: null, grossProfit: null, grossMarginPct: null, grossMarginPercent: null, operatingExpenses,
-    ebitda: null, estimatedTaxExpense: null, estimatedCorporateTax: null, estimatedDoctorTaxPph21: null,
-    netOperatingProfit: null, netProfit: null, netMarginPct: null, netMarginPercent: null,
+    hppPharmacyCogs, cogsPharmacy: hppPharmacyCogs, hppMedicalFeeDirect: recordedMedicalFees, directDoctorFeeExpense: recordedMedicalFees,
+    totalHpp: hppPharmacyCogs + recordedMedicalFees, grossProfit, grossMarginPct, grossMarginPercent: grossMarginPct, operatingExpenses,
+    ebitda, estimatedTaxExpense: null, estimatedCorporateTax: null, estimatedDoctorTaxPph21: null,
+    netOperatingProfit: ebitda, netProfit: null, netMarginPct: null, netMarginPercent: null,
     balanceSheet: {
-      cashAndBank: null, accountsReceivablePatientsAndJkn: totalReceivables, accountsReceivable: totalReceivables,
+      cashAndBank: hasJournals ? (journalTotals['1-1100'] ?? journalTotals['1-1000'] ?? journalTotals['KAS'] ?? null) : null, accountsReceivablePatientsAndJkn: totalReceivables, accountsReceivable: totalReceivables,
       inventoryMedicationAssetHna: totalAssetHnaRp, inventoryAssetHna: totalAssetHnaRp, medicalEquipmentFixedAssets: null, totalAssets: null,
       accountsPayablePbf: totalPayablePbf, medicalFeePayable: null, doctorFeePayable: null, patientDepositsLiability: null, taxPayable: null,
       totalLiabilities: null, paidInCapitalEquity: null, retainedEarningsAndCurrentProfit: null, retainedEarningsAndEquity: null,

@@ -427,12 +427,27 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     { key: 'satusehatEncounterId', header: 'SATUSEHAT Encounter ID' },
   ];
 
-  if (!activeVisit || !activePatient) {
+  if (!activeVisit) {
     return (
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-8 text-center">
         <p className="text-sm text-slate-600 dark:text-slate-400">
           Pilih kunjungan dari antrean untuk membuka rekam medis pasien.
         </p>
+      </div>
+    );
+  }
+
+  if (!activePatient) {
+    return (
+      <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <p className="text-sm text-slate-600 dark:text-slate-400">Data identitas pasien ini tidak ada pada cuplikan yang termuat. Pilih kunjungan lain. Catatan klinis tidak ditampilkan agar tidak tertukar.</p>
+        <div className="max-h-80 space-y-1 overflow-y-auto">
+          {workspace.visits.map((visit) => (
+            <button key={visit.id} type="button" onClick={() => onSelectVisitId(visit.id)} className="block w-full rounded-lg border px-3 py-2 text-left text-xs dark:border-slate-700">
+              {visit.queueNumber} · {visit.patientName} · {visit.mrNumber}
+            </button>
+          ))}
+        </div>
       </div>
     );
   }
@@ -589,7 +604,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
               facilityName={workspace.activeFacility.name}
               facilityCode={facilityCode}
               columns={rmeExportColumns}
-              rows={workspace.soapRecords}
+              rows={workspace.soapRecords.filter((record) => record.patientId === activePatient.id)}
               compact
             />
           </div>
@@ -617,9 +632,9 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
                 setSurgeryName('');
                 await onRefreshWorkspace();
               }}>
-                <input required value={surgeryName} onChange={(event) => setSurgeryName(event.target.value)} placeholder="Nama tindakan" className="rounded border px-2 py-1.5" />
-                <input required type="datetime-local" value={surgeryAt} onChange={(event) => setSurgeryAt(event.target.value)} className="rounded border px-2 py-1.5" />
-                <input required value={surgeryRoom} onChange={(event) => setSurgeryRoom(event.target.value)} placeholder="Kamar operasi" className="rounded border px-2 py-1.5" />
+                <input required value={surgeryName} onChange={(event) => setSurgeryName(event.target.value)} placeholder="Nama tindakan" className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                <input required type="datetime-local" value={surgeryAt} onChange={(event) => setSurgeryAt(event.target.value)} className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                <input required value={surgeryRoom} onChange={(event) => setSurgeryRoom(event.target.value)} placeholder="Kamar operasi" className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
                 <button type="submit" className="rounded bg-[#00897B] px-3 py-1.5 font-semibold text-white">Jadwalkan</button>
               </form>
               <div className="font-bold text-[#0F2922] dark:text-white">

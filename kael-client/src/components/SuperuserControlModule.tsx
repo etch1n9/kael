@@ -475,20 +475,22 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
     }
   };
 
-  const handleExportFullBackupJson = () => {
-    const payload = JSON.stringify(workspace, null, 2);
-    const blob = new Blob([payload], { type: 'application/json;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute(
-      'download',
-      `kael-simrs-backup-${facilityCode.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.json`
-    );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  const handleExportFullBackupJson = async () => {
+    setFeedback(null);
+    try {
+      const payload = await kaelApi.exportBackup(token);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `kael-simrs-backup-${facilityCode.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setFeedback({ type: 'error', text: error instanceof Error ? error.message : 'Cadangan lengkap belum dapat diunduh.' });
+    }
   };
 
   const handleSaveFacilitySubmit = async (e: React.FormEvent) => {
@@ -728,7 +730,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer ${
               subTab === 'USERS'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E]'
             }`}
           >
             <UserCog className="w-3.5 h-3.5" />
@@ -737,7 +739,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
           <button
             type="button"
             onClick={() => setSubTab('ROLES')}
-            className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer ${subTab === 'ROLES' ? 'bg-[#00897B] text-white' : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'}`}
+            className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer ${subTab === 'ROLES' ? 'bg-[#00897B] text-white' : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E]'}`}
           >
             <ShieldCheck className="w-3.5 h-3.5" />
             Peran dan hak akses ({roles.length})
@@ -749,7 +751,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
               subTab === 'MASTERS'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E]'
             }`}
           >
             <Building2 className="w-3.5 h-3.5" />
@@ -762,7 +764,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer ${
               subTab === 'CAPABILITY_CONFIG'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E]'
             }`}
           >
             <ShieldCheck className="w-3.5 h-3.5" />
@@ -774,7 +776,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer ${
               subTab === 'FACILITIES'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E]'
             }`}
           >
             <Building2 className="w-3.5 h-3.5" />
@@ -786,7 +788,7 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             className={`px-4 py-2 text-xs font-semibold rounded-xl transition-colors whitespace-normal text-left max-w-full shrink-0 flex items-center gap-1.5 cursor-pointer ${
               subTab === 'SERVER_AUDIT'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E]'
             }`}
           >
             <Server className="w-3.5 h-3.5" />
@@ -1441,12 +1443,12 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
               setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Bukti belum tersimpan.' });
             }
           }}>
-            <select value={evidenceType} onChange={(event) => setEvidenceType(event.target.value)} className="rounded border px-2 py-1.5">
+            <select value={evidenceType} onChange={(event) => setEvidenceType(event.target.value)} className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
               {['SIP_NAKES', 'IZIN_OPERASIONAL', 'KALIBRASI_ALKES', 'MOU_PIHAK_KETIGA', 'IZIN_BAPETEN_RADIOLOGI'].map((kind) => <option key={kind} value={kind}>{kind}</option>)}
             </select>
-            <input required value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="Nomor dokumen" className="rounded border px-2 py-1.5" />
-            <input required value={evidenceHolder} onChange={(event) => setEvidenceHolder(event.target.value)} placeholder="Pemegang / penerbit" className="rounded border px-2 py-1.5" />
-            <input required type="date" value={evidenceUntil} onChange={(event) => setEvidenceUntil(event.target.value)} className="rounded border px-2 py-1.5" />
+            <input required value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="Nomor dokumen" className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+            <input required value={evidenceHolder} onChange={(event) => setEvidenceHolder(event.target.value)} placeholder="Pemegang / penerbit" className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+            <input required type="date" value={evidenceUntil} onChange={(event) => setEvidenceUntil(event.target.value)} className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
             <button type="submit" className="rounded bg-teal-700 px-3 py-1.5 font-semibold text-white">Simpan bukti</button>
           </form>
           <div className="grid min-w-0 [&>*]:min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-form-min-inline-size)),1fr))] gap-5 items-start">

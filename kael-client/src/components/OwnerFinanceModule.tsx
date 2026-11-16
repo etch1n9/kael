@@ -84,7 +84,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
   useEffect(() => {
     if (!allowedTabs.includes(subTab) && allowedTabs[0]) setSubTab(allowedTabs[0]);
   }, [initialView, subTab, grantedModules.join(',')]);
-  const [receiptDrafts, setReceiptDrafts] = useState<Record<string, { amount: number | ''; reference: string }>>({});
+  const [receiptDrafts, setReceiptDrafts] = useState<Record<string, { amount: number | ''; reference: string; final?: boolean }>>({});
   const rawEntries = useMemo(() => {
     if (scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance) {
       return workspace.multiFacilityFinance.accountingEntries;
@@ -267,7 +267,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
     }
     setIsSubmitting(true);
     try {
-      const res = await kaelApi.reconcileFinanceClaim(token, inv.facilityCode, inv.id, { receivedAmount: receipt.amount, paymentReference: receipt.reference.trim() });
+      const res = await kaelApi.reconcileFinanceClaim(token, inv.facilityCode, inv.id, { receivedAmount: receipt.amount, paymentReference: receipt.reference.trim(), final: receipt.final === true });
       setReceiptDrafts((previous) => { const next = { ...previous }; delete next[inv.id]; return next; });
       await onRefreshWorkspace();
       setFeedback({
@@ -920,7 +920,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                   </tr>
                 ) : (
                   <>
-                  {claimPage.bar}{claimPage.rows.map((inv) => {
+                  {claimPage.rows.map((inv) => {
                     const effectiveAmount = inv.claimRequestedAmount ?? Math.max(0, inv.subtotal - inv.discountAmount);
                     return (
                       <tr key={inv.id} className="hover:bg-[#F3F8F6] dark:hover:bg-[#0F2B25]">
@@ -958,8 +958,9 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                         <td className="py-3 px-4 text-right">
                           {inv.status === 'KLAIM_DIAJUKAN' && inv.pricingStatus !== 'PENDING' ? (
                             <div className="space-y-2">
-                            <input type="number" min={0} step="any" value={receiptDrafts[inv.id]?.amount ?? ''} onChange={(event) => setReceiptDrafts((previous) => ({ ...previous, [inv.id]: { reference: previous[inv.id]?.reference || '', amount: event.target.value === '' ? '' : Number(event.target.value) } }))} placeholder="Nominal diterima aktual" aria-label={`Nominal penerimaan ${inv.invoiceNumber}`} className="min-w-0 w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
-                            <input type="text" value={receiptDrafts[inv.id]?.reference || ''} onChange={(event) => setReceiptDrafts((previous) => ({ ...previous, [inv.id]: { amount: previous[inv.id]?.amount ?? '', reference: event.target.value } }))} placeholder="Referensi pembayaran" aria-label={`Referensi penerimaan ${inv.invoiceNumber}`} className="min-w-0 w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+                            <input type="number" min={0} step="any" value={receiptDrafts[inv.id]?.amount ?? ''} onChange={(event) => setReceiptDrafts((previous) => ({ ...previous, [inv.id]: { reference: previous[inv.id]?.reference || '', final: previous[inv.id]?.final === true, amount: event.target.value === '' ? '' : Number(event.target.value) } }))} placeholder="Nominal diterima aktual" aria-label={`Nominal penerimaan ${inv.invoiceNumber}`} className="min-w-0 w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+                            <input type="text" value={receiptDrafts[inv.id]?.reference || ''} onChange={(event) => setReceiptDrafts((previous) => ({ ...previous, [inv.id]: { amount: previous[inv.id]?.amount ?? '', final: previous[inv.id]?.final === true, reference: event.target.value } }))} placeholder="Referensi pembayaran" aria-label={`Referensi penerimaan ${inv.invoiceNumber}`} className="min-w-0 w-full px-2 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950" />
+                            <label className="flex items-center gap-1 text-caption"><input type="checkbox" checked={receiptDrafts[inv.id]?.final === true} onChange={(event) => setReceiptDrafts((previous) => ({ ...previous, [inv.id]: { amount: previous[inv.id]?.amount ?? '', reference: previous[inv.id]?.reference || '', final: event.target.checked } }))} /> Pelunasan final</label>
                             <button
                               type="button"
                               disabled={isSubmitting}
@@ -982,6 +983,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                 )}
               </tbody>
             </table>
+            <PageBar page={claimPage.page} pages={claimPage.pages} setPage={claimPage.setPage} />
           </div>
           </div>
         </div>

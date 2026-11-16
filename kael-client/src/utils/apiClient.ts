@@ -251,6 +251,17 @@ export const kaelApi = {
   fetchWorkspace: (token: string, facilityCode: string, signal?: AbortSignal) =>
     requestJson<WorkspacePayload>('/workspace?limit=500', { method: 'GET', signal }, token, facilityCode),
 
+  searchRecords: (token: string, facilityCode: string, q: string, signal?: AbortSignal) =>
+    requestJson<{ patients: Patient[]; visits: VisitQueueItem[]; invoices: InvoiceRecord[] }>(
+      `/search?q=${encodeURIComponent(q)}`,
+      { method: 'GET', signal },
+      token,
+      facilityCode
+    ),
+
+  exportBackup: (token: string) =>
+    requestJson<Record<string, unknown>>('/admin/export-backup', { method: 'GET' }, token),
+
   createPatient: (token: string, facilityCode: string, payload: Partial<Patient>) =>
     requestJson<Patient>(
       '/patients',
@@ -604,7 +615,7 @@ export const kaelApi = {
       facilityCode
     ),
 
-  reconcileFinanceClaim: (token: string, facilityCode: string, invoiceId: string, payload: { receivedAmount: number; paymentReference: string }) =>
+  reconcileFinanceClaim: (token: string, facilityCode: string, invoiceId: string, payload: { receivedAmount: number; paymentReference: string; final?: boolean }) =>
     requestJson<{ invoice: InvoiceRecord; entry: AccountingEntry }>(
       '/finance/reconcile-claim',
       {
@@ -634,6 +645,8 @@ export const kaelApi = {
       status?: InpatientBed['status'];
       diagnosis?: string;
       attendingDoctor?: string;
+      cpptNote?: string;
+      admissionId?: string;
     }
   ) =>
     requestJson<InpatientBed>(
@@ -750,7 +763,7 @@ export const kaelApi = {
     token: string,
     facilityCode: string,
     kind: 'attendance' | 'leave' | 'payroll',
-    payload: { staffName: string; note?: string; date?: string; amount?: number }
+    payload: { staffName: string; note?: string; date?: string; amount?: number; status?: 'PENDING' | 'APPROVED' | 'REJECTED' }
   ) => requestJson<Record<string, unknown>>(`/staff/${kind === 'leave' ? 'leave' : kind === 'payroll' ? 'payroll' : 'attendance'}`, {
     method: 'POST',
     body: JSON.stringify(payload),

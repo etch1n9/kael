@@ -1,4 +1,5 @@
 use crate::domain::fefo;
+use crate::finance::{append_service_charge, inventory_receipt, post_cogs};
 use crate::http::{
     ApiError, ApiResult, App, RequestContext, array, array_mut, audit, bad_request, conflict, id,
     json_response, not_found, now, require_service, save, text,
@@ -184,13 +185,22 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
         .map(|i| n(&array(&med, "batches")[i], "stock"))
         .unwrap_or(0.0);
     if let Some(i) = batch_index {
+        let existing_expiry = text(&array(&med, "batches")[i], "expiryDate").to_owned();
+        if !existing_expiry.is_empty() && existing_expiry != expiry {
+            return Err(conflict("Tanggal kedaluwarsa batch ini berbeda dengan data yang sudah tercatat."));
+        }
         array_mut(&mut med, "batches")[i]["stock"] = json!(before + qty);
-        array_mut(&mut med, "batches")[i]["expiryDate"] = json!(expiry);
+        if existing_expiry.is_empty() {
+            array_mut(&mut med, "batches")[i]["expiryDate"] = json!(expiry);
+        }
     } else {
         array_mut(&mut med, "batches")
             .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":qty}));
     }
     let supplier = text(body, "supplierName").trim();
+    if let Some(price) = body.get("buyPrice").filter(|value| value.is_number()).and_then(Value::as_f64).filter(|price| price.is_finite() && *price >= 0.0) {
+        med["buyPrice"] = json!(price);
+    }
     let notes = format!("Penerimaan stok masuk Batch {batch} (ED {expiry}) dari {supplier}");
     stock_mutation(
         app,
@@ -205,6 +215,8 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
         supplier,
         &notes,
     );
+    let cost = (qty * n(&med, "buyPrice")).round();
+    inventory_receipt(app, ctx, cost, &notes, &format!("PBF-{batch}"));
     array_mut(&mut app.db, "medications")[index] = med.clone();
     audit(
         app,
@@ -299,6 +311,14 @@ fn direct(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Value
         text(&med, "name"),
         text(&med, "unit")
     );
+    let reference = id("DSP");
+    post_cogs(app, ctx, (quantity * n(&med, "buyPrice")).round(), &description, &reference);
+    let visit_id = text(body, "visitId");
+    if !visit_id.is_empty() {
+        if let Some(visit) = array(&app.db, "visits").iter().find(|visit| text(visit, "id") == visit_id && text(visit, "facilityCode") == ctx.facility_code).cloned() {
+            append_service_charge(app, ctx, visit_id, text(&visit, "patientId"), text(&visit, "patientName"), text(&visit, "mrNumber"), text(&visit, "guarantor"), text(&visit, "guarantorSettlement"), "FARMASI", &format!("Obat langsung: {}", text(&med, "name")), quantity, n(&med, "sellPrice"));
+        }
+    }
     array_mut(&mut app.db, "medications")[index] = med.clone();
     audit(
         app,
@@ -387,9 +407,14 @@ fn dispense(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -
     let pending_lab = array(&app.db, "labOrders").iter().any(|lab| {
         text(lab, "visitId") == text(&order, "visitId")
             && text(lab, "facilityCode") == ctx.facility_code
-            && text(lab, "status") != "SELESAI_VERIFIKASI"
+            && !matches!(text(lab, "status"), "SELESAI_VERIFIKASI" | "BATAL")
     });
-    if !pending_lab {
+    let pending_rad = array(&app.db, "radiologyOrders").iter().any(|row| {
+        text(row, "visitId") == text(&order, "visitId")
+            && text(row, "facilityCode") == ctx.facility_code
+            && !matches!(text(row, "status"), "EXPERTISE_VERIFIED" | "BATAL")
+    });
+    if !pending_lab && !pending_rad {
         for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
             text(v, "id") == text(&order, "visitId")
                 && text(v, "facilityCode") == ctx.facility_code
@@ -451,6 +476,9 @@ fn opname(
                     text(&med, "name")
                 ))
             })?;
+        if !item.get("actualStock").is_some_and(Value::is_number) {
+            return Err(bad_request("Stok fisik harus berupa angka, bukan teks."));
+        }
         let actual = n(&item, "actualStock");
         if item.get("actualStock").is_none() || !actual.is_finite() || actual < 0.0 {
             return Err(bad_request("Stok fisik harus berupa angka nonnegatif."));

@@ -24,7 +24,7 @@ export function defaultServerOrigin(): string {
   if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
   // Vite dev/preview keeps the API on 1507. A unified server (any other port)
   // and an HTTPS tunnel (port 443) already serve /api on this page's origin.
-  if (url.port === '5173' || url.port === '4173') url.port = KAEL_SERVER_PORT;
+  if (url.port === '5173' || url.port === '4173' || url.port === '5174') return url.origin;
   return url.origin;
 }
 

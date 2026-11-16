@@ -584,6 +584,7 @@ export interface InpatientBed {
   stayDaysCount?: number;
   attendingDoctor?: string;
   diagnosis?: string;
+  admissionId?: string;
 }
 
 export interface MedicationBatch {

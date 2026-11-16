@@ -1,9 +1,10 @@
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fs::{self, OpenOptions},
     hash::{Hash, Hasher},
+    io::Write,
     path::Path,
     time::Duration,
 };
@@ -12,6 +13,17 @@ pub struct Storage {
     connection: Connection,
     fingerprints: HashMap<String, u64>,
     path: std::path::PathBuf,
+    lock_file: Option<std::fs::File>,
+    lock_path: std::path::PathBuf,
+}
+
+impl Drop for Storage {
+    fn drop(&mut self) {
+        if let Some(file) = self.lock_file.take() {
+            drop(file);
+            let _ = fs::remove_file(&self.lock_path);
+        }
+    }
 }
 
 const SCHEMA: &str = "
@@ -43,21 +55,55 @@ impl Storage {
         if !path.is_file() {
             return Err("Database KAEL belum tersedia. Jalankan perintah setup.".into());
         }
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(|error| format!("Database KAEL tidak dapat dibuka: {error}"))?;
-        configure(&connection)?;
-        let version: i64 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|error| error.to_string())?;
-        if version != 2 {
+        let (lock_file, lock_path) = claim_lock(path)?;
+        let mut connection = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE) {
+            Ok(connection) => connection,
+            Err(error) => {
+                drop(lock_file);
+                let _ = fs::remove_file(&lock_path);
+                return Err(format!("Database KAEL tidak dapat dibuka: {error}"));
+            }
+        };
+        if let Err(error) = configure(&connection) {
+            drop(lock_file);
+            let _ = fs::remove_file(&lock_path);
+            return Err(error);
+        }
+        let version: i64 = match connection.pragma_query_value(None, "user_version", |row| row.get(0)) {
+            Ok(version) => version,
+            Err(error) => {
+                drop(lock_file);
+                let _ = fs::remove_file(&lock_path);
+                return Err(error.to_string());
+            }
+        };
+        if version == 1 {
+            if let Err(error) = migrate_v1(&mut connection) {
+                drop(lock_file);
+                let _ = fs::remove_file(&lock_path);
+                return Err(error);
+            }
+        } else if version != 2 {
+            drop(lock_file);
+            let _ = fs::remove_file(&lock_path);
             return Err("Versi schema database KAEL tidak didukung. Kosongkan database lalu jalankan setup.".into());
         }
-        let (db, fingerprints) = read_database(&connection, path)?;
+        let loaded = read_database(&connection, path);
+        let (db, fingerprints) = match loaded {
+            Ok(value) => value,
+            Err(error) => {
+                drop(lock_file);
+                let _ = fs::remove_file(&lock_path);
+                return Err(error);
+            }
+        };
         Ok((
             Self {
                 connection,
                 fingerprints,
                 path: path.to_path_buf(),
+                lock_file: Some(lock_file),
+                lock_path,
             },
             db,
         ))
@@ -69,6 +115,7 @@ impl Storage {
         Ok(next)
     }
 
+    #[allow(dead_code)]
     pub fn save(&mut self, db: &Value) -> Result<(), String> {
         let transaction = self
             .connection
@@ -94,11 +141,16 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
-    pub fn save_sessions(&mut self, sessions: &HashMap<String, (String, String, i64)>) -> Result<(), String> {
+    pub fn save_all(
+        &mut self,
+        db: &Value,
+        sessions: &HashMap<String, (String, String, i64)>,
+    ) -> Result<(), String> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("Database sedang tidak dapat ditulis: {error}"))?;
+        let fingerprints = write_database(&transaction, db, &self.fingerprints)?;
         transaction
             .execute("DELETE FROM sessions", [])
             .map_err(|error| error.to_string())?;
@@ -112,7 +164,42 @@ impl Storage {
                     .map_err(|error| error.to_string())?;
             }
         }
-        transaction.commit().map_err(|error| error.to_string())
+        transaction
+            .commit()
+            .map_err(|error| format!("Commit database gagal: {error}"))?;
+        self.fingerprints = fingerprints;
+        Ok(())
+    }
+
+    pub fn next_sequence(&mut self, key: &str, at_least: i64) -> Result<i64, String> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch("CREATE TABLE IF NOT EXISTS sequences (key TEXT PRIMARY KEY, value INTEGER NOT NULL);")
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO sequences (key, value) VALUES (?1, 0) ON CONFLICT(key) DO NOTHING",
+                params![key],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE sequences SET value = MAX(value, ?2) + 1 WHERE key = ?1",
+                params![key, at_least],
+            )
+            .map_err(|error| error.to_string())?;
+        let value: i64 = transaction
+            .query_row(
+                "SELECT value FROM sequences WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(value)
     }
 
     pub fn delete_session(&mut self, token: &str) -> Result<(), String> {
@@ -168,6 +255,71 @@ impl Storage {
     }
 }
 
+fn claim_lock(path: &Path) -> Result<(std::fs::File, std::path::PathBuf), String> {
+    let lock_path = path.with_extension("sqlite.lock");
+    for _ in 0..3 {
+        match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(mut file) => {
+                let _ = write!(file, "{}", std::process::id());
+                let _ = file.sync_all();
+                return Ok((file, lock_path));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let pid = fs::read_to_string(&lock_path)
+                    .ok()
+                    .and_then(|raw| raw.trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                let alive = pid > 0 && pid != std::process::id() && Path::new(&format!("/proc/{pid}")).exists();
+                if alive {
+                    return Err("Database KAEL sedang dipakai proses lain. Jalankan satu server untuk satu database.".into());
+                }
+                let _ = fs::remove_file(&lock_path);
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("Kunci proses database KAEL tidak dapat diambil.".into())
+}
+
+fn migrate_v1(connection: &mut Connection) -> Result<(), String> {
+    let payload: String = connection
+        .query_row("SELECT payload FROM kael_state WHERE id = 1", [], |row| row.get(0))
+        .map_err(|error| format!("Database skema lama tidak dapat dibaca: {error}"))?;
+    let db: Value = serde_json::from_str(&payload).map_err(|_| "Snapshot database lama tidak valid.".to_string())?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS records (
+                collection TEXT NOT NULL,
+                id TEXT NOT NULL,
+                facility_code TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL,
+                PRIMARY KEY (collection, id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_records_fac ON records(collection, facility_code, created_at DESC);
+            CREATE TABLE IF NOT EXISTS documents (
+                key TEXT PRIMARY KEY,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                facility_code TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, expires_at DESC);",
+        )
+        .map_err(|error| error.to_string())?;
+    write_database(&transaction, &db, &HashMap::new())?;
+    transaction
+        .execute_batch("DROP TABLE IF EXISTS kael_state; PRAGMA user_version = 2;")
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| format!("Migrasi database lama gagal: {error}"))
+}
+
 fn configure(connection: &Connection) -> Result<(), String> {
     connection.busy_timeout(Duration::from_secs(5)).map_err(|error| error.to_string())?;
     connection.pragma_update(None, "journal_mode", "WAL").map_err(|error| error.to_string())?;
@@ -179,7 +331,7 @@ fn read_database(connection: &Connection, path: &Path) -> Result<(Value, HashMap
     let mut db = json!({});
     let mut fingerprints = HashMap::new();
     let mut statement = connection
-        .prepare("SELECT collection, id, payload FROM records")
+        .prepare("SELECT collection, id, payload FROM records ORDER BY rowid ASC")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
@@ -221,10 +373,10 @@ fn write_database(
             continue;
         }
         if let Some(rows) = value.as_array() {
-            let mut seen = Vec::new();
+            let mut seen = HashSet::new();
             for row in rows {
                 let id = record_id(row);
-                if id.is_empty() || seen.iter().any(|existing: &String| existing == &id) {
+                if id.is_empty() || !seen.insert(id.clone()) {
                     continue;
                 }
                 let payload = serde_json::to_string(row).map_err(|error| error.to_string())?;
@@ -238,22 +390,15 @@ fn write_database(
                     ).map_err(|error| error.to_string())?;
                 }
                 next.insert(mark, digest);
-                seen.push(id);
             }
-            let mut statement = transaction
-                .prepare("SELECT id FROM records WHERE collection = ?1")
-                .map_err(|error| error.to_string())?;
-            let existing: Vec<String> = statement
-                .query_map(params![key], |row| row.get(0))
-                .map_err(|error| error.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| error.to_string())?;
-            drop(statement);
-            for id in existing {
-                if !seen.iter().any(|item| item == &id) {
-                    transaction
-                        .execute("DELETE FROM records WHERE collection = ?1 AND id = ?2", params![key, id])
-                        .map_err(|error| error.to_string())?;
+            let prefix = format!("{key}\u{1}");
+            for existing in previous.keys() {
+                if let Some(id) = existing.strip_prefix(&prefix) {
+                    if !seen.contains(id) {
+                        transaction
+                            .execute("DELETE FROM records WHERE collection = ?1 AND id = ?2", params![key, id])
+                            .map_err(|error| error.to_string())?;
+                    }
                 }
             }
         } else if !value.is_null() {
@@ -273,7 +418,7 @@ fn write_database(
 }
 
 fn record_id(row: &Value) -> String {
-    for key in ["id", "code", "entryNumber", "invoiceNumber", "journalNumber"] {
+    for key in ["id", "configId", "snapshotId", "idempotencyKey", "code", "entryNumber", "invoiceNumber", "journalNumber"] {
         let value = text_of(row, key);
         if !value.is_empty() {
             return value;
@@ -287,7 +432,7 @@ fn text_of(value: &Value, key: &str) -> String {
 }
 
 fn created_of(value: &Value) -> String {
-    for key in ["createdAt", "timestamp", "updatedAt"] {
+    for key in ["createdAt", "timestamp", "recordedAt", "publishedAt", "orderDate", "updatedAt"] {
         let found = text_of(value, key);
         if !found.is_empty() {
             return found;
@@ -315,7 +460,7 @@ fn normalize(db: &mut Value, path: &Path) -> Result<(), String> {
         "pharmacyOrders", "labOrders", "invoices", "accountingEntries", "bridgingLogs", "auditLogs",
         "roles", "facilityConfigs", "evidenceRegistry", "medicationMutations", "purchaseOrders",
         "radiologyOrders", "surgicalSchedules", "referrals", "doubleEntryJournals", "idempotencyRecords",
-        "attendance", "leaveRequests", "payrollRuns",
+        "attendance", "leaveRequests", "payrollRuns", "inpatientNotes", "soapRevisions",
     ] {
         if db[key].is_null() {
             db[key] = json!([]);

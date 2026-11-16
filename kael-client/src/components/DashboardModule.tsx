@@ -13,6 +13,7 @@ import {
 } from '../domain/platformEngine.ts';
 import { DataExportToolbar } from './DataExportToolbar';
 import { KpiSparklineCanvas } from './KpiSparklineChart';
+import { usePage } from './PageBar';
 import { ExportColumn } from '../utils/exportDocument';
 import { unitLabel, visitUnits } from '../utils/facilityMasters';
 
@@ -93,6 +94,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
   const filteredVisits = useMemo(() => {
     const q = queueSearch.trim().toLowerCase();
     return todaysVisits.filter((v) => {
+      if (v.status === 'SELESAI' || v.status === 'BATAL') return false;
       if (poliFilter !== 'ALL' && v.polyclinic !== poliFilter) return false;
       if (statusFilter !== 'ALL' && v.status !== statusFilter) return false;
       if (!q) return true;
@@ -105,6 +107,8 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
       );
     });
   }, [visits, todayKey, queueSearch, poliFilter, statusFilter]);
+
+  const queuePage = usePage(filteredVisits, 50);
 
   const canAccessOwnerFinance = canUserAccessModule(user, 'KEUANGAN_OWNER');
 
@@ -292,7 +296,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredVisits.map((visit) => (
+                queuePage.rows.map((visit) => (
                   <tr
                     key={visit.id}
                     className="hover:bg-[#F3F8F6] dark:hover:bg-[#0F2B25] transition-colors"
@@ -347,6 +351,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
             </tbody>
           </table>
         </div>
+        {queuePage.bar}
       </section>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-form-min-inline-size)),1fr))] gap-3 min-w-0">
         <section className="min-w-0 bg-white dark:bg-[#0B211D] border border-[#E2ECE8] dark:border-[#183831] rounded-xl p-4 space-y-3">

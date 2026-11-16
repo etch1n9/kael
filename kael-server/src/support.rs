@@ -1,6 +1,6 @@
 use crate::finance::append_service_charge;
 use crate::http::{
-    ApiResult, App, RequestContext, array, array_mut, audit, bad_request, id, json_response,
+    ApiResult, App, RequestContext, array, array_mut, audit, bad_request, conflict, id, json_response,
     next_document, not_found, now, require_service, save, text,
 };
 use crate::pharmacy::stock_mutation;
@@ -78,6 +78,15 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         return Err(bad_request("Tanggal jatuh tempo faktur tidak valid."));
     }
     let timestamp = now();
+    let invoice = alias(body, "invoicePbfNumber", "supplierInvoiceNo").trim();
+    if receive && !invoice.is_empty() && array(&app.db, "purchaseOrders").iter().any(|order| {
+        text(order, "facilityCode") == ctx.facility_code
+            && text(order, "supplierInvoiceNo").eq_ignore_ascii_case(invoice)
+            && text(order, "supplierName").eq_ignore_ascii_case(supplier)
+            && text(order, "status") == "RECEIVED_FULL"
+    }) {
+        return Err(conflict("Faktur pemasok ini sudah diterima. Penerimaan ganda dihentikan."));
+    }
     let mut items = vec![];
     let mut subtotal = 0.0;
     let mut discounts = 0.0;
@@ -155,8 +164,14 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                 .map(|index| n(&array(&med, "batches")[index], "stock"))
                 .unwrap_or(0.0);
             if let Some(index) = batch_index {
+                let existing_expiry = text(&array(&med, "batches")[index], "expiryDate").to_owned();
+                if !existing_expiry.is_empty() && existing_expiry != expiry {
+                    return Err(conflict("Tanggal kedaluwarsa batch ini berbeda dengan data yang sudah tercatat."));
+                }
                 array_mut(&mut med, "batches")[index]["stock"] = json!(before + qty);
-                array_mut(&mut med, "batches")[index]["expiryDate"] = json!(expiry);
+                if existing_expiry.is_empty() {
+                    array_mut(&mut med, "batches")[index]["expiryDate"] = json!(expiry);
+                }
             } else {
                 array_mut(&mut med, "batches")
                     .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":qty}));
@@ -181,7 +196,6 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     let net = (subtotal - discounts).max(0.0);
     let vat = (net * vat_rate / 100.0).round();
     let total = net + vat;
-    let invoice = alias(body, "invoicePbfNumber", "supplierInvoiceNo");
     let po = json!({"id":id("po"),"facilityCode":ctx.facility_code,"poNumber":po_number,"supplierPbfName":supplier,"supplierName":supplier,"orderDate":&timestamp[..10],"dueDate":due_date,"status":if receive{"RECEIVED_FULL"}else{"ORDERED"},"items":items,"subtotalHna":subtotal,"discountTotal":discounts,"totalDiscount":discounts,"vatRatePct":vat_rate,"ppnAmount":vat,"totalVat":vat,"grandTotalPayable":total,"totalAmount":total,"invoicePbfNumber":invoice,"supplierInvoiceNo":invoice,"createdBy":ctx.user["fullName"],"receivedAt":if receive{json!(timestamp)}else{Value::Null}});
     let journal = if receive {
         let tenant = array(&app.db, "facilities")
@@ -191,7 +205,7 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             .unwrap_or_else(|| ctx.facility_code.clone());
         let journal = json!({"id":id("gl"),"tenantId":tenant,"facilityCode":ctx.facility_code,"journalNumber":format!("GL/{}/{}/{}",ctx.facility_code.chars().take(4).collect::<String>(),timestamp[..10].replace('-',""),array(&app.db,"doubleEntryJournals").len()+1),"timestamp":timestamp,"eventType":"INVENTORY_RECEIVED_PBF","sourceTransactionId":po_number,"description":format!("Penerimaan Faktur PBF {supplier} ({invoice})"),"lines":[{"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP (HNA + PPN)","accountCategory":"ASSET","debit":total.round(),"credit":0,"costCenterCode":"CC-FAR"},{"accountCode":"2-1100","accountName":"Utang Dagang Distributor PBF","accountCategory":"LIABILITY","debit":0,"credit":total.round(),"costCenterCode":"CC-FAR"}],"totalDebit":total.round(),"totalCredit":total.round(),"isBalanced":total>0.0,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
         array_mut(&mut app.db, "doubleEntryJournals").push(journal.clone());
-        let entry = json!({"id":id("acc"),"facilityCode":ctx.facility_code,"entryNumber":journal["journalNumber"],"timestamp":timestamp,"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP","type":"PENGELUARAN","category":"PERSEDIAAN","description":journal["description"],"amount":total.round(),"referenceId":po_number});
+        let entry = json!({"id":id("acc"),"facilityCode":ctx.facility_code,"entryNumber":journal["journalNumber"],"timestamp":timestamp,"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP","type":"ASET","category":"PERSEDIAAN","description":journal["description"],"amount":total.round(),"referenceId":po_number});
         array_mut(&mut app.db, "accountingEntries").push(entry);
         journal
     } else {
@@ -281,6 +295,18 @@ fn referral(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             "Fasilitas tujuan rujukan dan kode ICD-10 wajib diisi.",
         ));
     }
+    if body["patientConsent"] != true {
+        return Err(bad_request("Persetujuan pasien untuk berbagi ringkasan rujukan wajib dicatat."));
+    }
+    let destination = text(body, "destinationFacilityCode").trim();
+    if destination.eq_ignore_ascii_case(&ctx.facility_code) {
+        return Err(bad_request("Fasilitas tujuan rujukan harus berbeda dari fasilitas asal."));
+    }
+    if array(&app.db, "facilities").iter().any(|row| text(row, "code").eq_ignore_ascii_case(destination))
+        && !array(&app.db, "facilities").iter().any(|row| text(row, "code").eq_ignore_ascii_case(destination) && row["active"] == true)
+    {
+        return Err(bad_request("Fasilitas tujuan terdaftar tetapi sudah nonaktif."));
+    }
     let patient = array(&app.db, "patients")
         .iter()
         .find(|row| {
@@ -304,7 +330,7 @@ fn referral(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         timestamp[..10].replace('-', "")
     );
     let number = format!("{head}{:04}", next_document(array(&app.db, "referrals"), "referralNumber", &head));
-    let record = json!({"id":id("ref"),"referralNumber":number,"patientId":patient["id"],"patientName":patient["fullName"],"nik":patient["nik"],"bpjsNumber":patient["bpjsNumber"],"originFacilityCode":ctx.facility_code,"originFacilityName":facility["name"],"destinationFacilityCode":text(body,"destinationFacilityCode").trim(),"destinationFacilityName":text(body,"destinationFacilityName").trim(),"direction":text(body,"direction"),"state":"CREATED","primaryIcd10Code":code,"primaryIcd10Name":default(body,"primaryIcd10Name",&code),"isSkdi4aDiagnosis":body["isSkdi4aDiagnosis"].as_bool(),"hasTaccException":body["hasTaccException"].as_bool(),"taccCategory":body["taccCategory"],"taccJustification":body["taccJustification"],"clinicalSummary":text(body,"clinicalSummary"),"stabilizationProvided":text(body,"stabilizationProvided"),"prbCarePlanNotes":body["prbCarePlanNotes"],"createdAt":timestamp,"updatedAt":timestamp});
+    let record = json!({"id":id("ref"),"referralNumber":number,"patientId":patient["id"],"patientName":patient["fullName"],"nik":patient["nik"],"bpjsNumber":patient["bpjsNumber"],"originFacilityCode":ctx.facility_code,"originFacilityName":facility["name"],"destinationFacilityCode":destination,"destinationFacilityName":text(body,"destinationFacilityName").trim(),"direction":text(body,"direction"),"state":"CREATED","patientConsent":true,"primaryIcd10Code":code,"primaryIcd10Name":default(body,"primaryIcd10Name",&code),"isSkdi4aDiagnosis":body["isSkdi4aDiagnosis"].as_bool(),"hasTaccException":body["hasTaccException"].as_bool(),"taccCategory":body["taccCategory"],"taccJustification":body["taccJustification"],"clinicalSummary":text(body,"clinicalSummary").chars().take(4000).collect::<String>(),"stabilizationProvided":text(body,"stabilizationProvided"),"prbCarePlanNotes":body["prbCarePlanNotes"],"createdAt":timestamp,"updatedAt":timestamp});
     array_mut(&mut app.db, "referrals").push(record.clone());
     audit(
         app,
@@ -357,13 +383,13 @@ fn bridging(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
 
 fn evidence(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if text(&ctx.user, "role") != "SUPERUSER" {
-        require_service(app, ctx, &["SUPERUSER_CONTROL", "SDM_JADWAL", "SDM_ERP"], &[])?;
+        require_service(app, ctx, &["LAPORAN_REGULASI", "SUPERUSER_CONTROL"], &[])?;
     }
     let kind = text(body, "evidenceType").trim().to_uppercase();
     let allowed = ["SIP_NAKES", "SIP_STR_NAKES", "SIPA_APOTEKER", "IZIN_OPERASIONAL", "KALIBRASI_ALKES", "MOU_PIHAK_KETIGA", "IZIN_BAPETEN_RADIOLOGI"];
-    let valid_until = text(body, "validUntil").trim();
-    if !allowed.contains(&kind.as_str()) || text(body, "documentNumber").trim().is_empty() || valid_until.is_empty() {
-        return Err(bad_request("Jenis bukti, nomor dokumen, dan masa berlaku wajib diisi."));
+    let valid_until = text(body, "validUntil").trim().to_owned();
+    if !allowed.contains(&kind.as_str()) || text(body, "documentNumber").trim().is_empty() || chrono::NaiveDate::parse_from_str(&valid_until, "%Y-%m-%d").is_err() {
+        return Err(bad_request("Jenis bukti, nomor dokumen, dan tanggal berlaku YYYY-MM-DD wajib valid."));
     }
     let record = json!({"id":id("evd"),"facilityCode":ctx.facility_code,"evidenceType":kind,"documentNumber":text(body,"documentNumber").trim(),"referenceNumber":text(body,"documentNumber").trim(),"subjectName":text(body,"holderName").trim(),"holderOrVendorName":text(body,"holderName").trim(),"validUntil":valid_until,"verificationStatus":"VERIFIED_ACTIVE","verifiedBy":text(&ctx.user,"username"),"createdAt":now()});
     array_mut(&mut app.db, "evidenceRegistry").push(record.clone());
@@ -385,14 +411,25 @@ fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
 }
 
 fn staff_record(app: &mut App, ctx: &RequestContext, body: &Value, collection: &str, action: &str) -> ApiResult {
-    if text(&ctx.user, "role") != "SUPERUSER" {
+    if collection == "payrollRuns" && text(&ctx.user, "role") != "SUPERUSER" {
+        require_service(app, ctx, &["SDM_ERP"], &[])?;
+    } else if text(&ctx.user, "role") != "SUPERUSER" {
         require_service(app, ctx, &["SDM_ERP", "SDM_JADWAL"], &[])?;
     }
     if text(body, "staffName").trim().is_empty() {
         return Err(bad_request("Nama pegawai wajib diisi."));
     }
-    let record = json!({"id":id("sdm"),"facilityCode":ctx.facility_code,"staffName":text(body,"staffName").trim(),"kind":action,"note":text(body,"note").trim(),"amount":body["amount"].as_f64().filter(|amount| amount.is_finite()).unwrap_or(0.0).round(),"date":text(body,"date").trim(),"createdAt":now(),"createdBy":text(&ctx.user,"username")});
+    let status = match text(body, "status").trim() {
+        "APPROVED" | "REJECTED" | "PENDING" => text(body, "status").trim().to_owned(),
+        _ => "PENDING".into(),
+    };
+    let amount = body["amount"].as_f64().filter(|amount| amount.is_finite()).unwrap_or(0.0).round();
+    let record = json!({"id":id("sdm"),"facilityCode":ctx.facility_code,"staffName":text(body,"staffName").trim(),"kind":action,"note":text(body,"note").trim().chars().take(4000).collect::<String>(),"amount":amount,"status":status,"date":text(body,"date").trim(),"createdAt":now(),"createdBy":text(&ctx.user,"username")});
     array_mut(&mut app.db, collection).push(record.clone());
+    if collection == "payrollRuns" && amount > 0.0 && status == "APPROVED" {
+        let entry = crate::finance::accounting_entry(app, ctx, "5-2000", "Beban Gaji SDM", "PENGELUARAN", "GAJI_SDM", &format!("Penggajian {}", text(&record, "staffName")), amount, &text(&record, "id"));
+        crate::finance::record_books(app, ctx, &entry);
+    }
     audit(app, ctx, action, text(&record, "id"), &format!("{action} {}.", text(&record, "staffName")));
     save(app)?;
     json_response(201, record)

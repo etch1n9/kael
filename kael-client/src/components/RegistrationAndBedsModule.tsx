@@ -552,7 +552,8 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
     setIsSaving(true);
     try {
       await kaelApi.updateBedStatus(token, activeFacility.code, cpptBedId, {
-        diagnosis: cpptNote.trim(),
+        cpptNote: cpptNote.trim(),
+        admissionId: beds.find((bed) => bed.id === cpptBedId)?.admissionId,
       });
       setCpptBedId(null);
       await onRefreshWorkspace();
@@ -1499,7 +1500,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                       </tr>
                     ) : (
                       <>
-                      {visitPage.bar}{visitPage.rows.map((v) => (
+                      {visitPage.rows.map((v) => (
                         <tr
                           key={v.id}
                           className="hover:bg-emerald-50/40 dark:hover:bg-slate-800/40 transition-colors"
@@ -1592,6 +1593,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                     )}
                   </tbody>
                 </table>
+                <PageBar page={visitPage.page} pages={visitPage.pages} setPage={visitPage.setPage} />
               </div>
             </div>
           </div>
@@ -1931,7 +1933,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                  {patientPage.bar}{patientPage.rows.map((p) => (
+                  {patientPage.rows.map((p) => (
                     <tr
                       key={p.id}
                       className="hover:bg-emerald-50/30 dark:hover:bg-slate-800/40 transition-colors"
@@ -1998,6 +2000,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                   ))}
                 </tbody>
               </table>
+              <PageBar page={patientPage.page} pages={patientPage.pages} setPage={patientPage.setPage} />
             </div>
           </div>
         </div>
@@ -2302,7 +2305,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
           )}
 
           <div className="grid min-w-0 [&>*]:min-w-0 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {bedPage.bar}{bedPage.rows.map((bed) => (
+            {bedPage.rows.map((bed) => (
               <div
                 key={bed.id}
                 className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between"
@@ -2401,6 +2404,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
               </div>
             ))}
           </div>
+          <PageBar page={bedPage.page} pages={bedPage.pages} setPage={bedPage.setPage} />
         </div>
       )}
     </div>

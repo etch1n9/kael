@@ -60,8 +60,9 @@ export function DataExportToolbar<T = Record<string, unknown>>({
   };
 
   const handleDownloadPdf = () => {
-    exportToPdf(payload);
-    triggerNotice(`PDF dengan ${rows.length} baris disiapkan untuk diunduh.`);
+    const result = exportToPdf(payload);
+    const formatLabel = result.format === 'csv' ? 'CSV' : 'PDF';
+    triggerNotice(`${formatLabel} dengan ${rows.length} baris disiapkan untuk diunduh.`);
   };
 
   return (
@@ -172,6 +173,11 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                   <X className="w-4 h-4" />
                   <span>Tutup</span>
                 </button>
+                {feedbackToast && (
+                  <span role="status" className="text-caption font-medium px-2 py-0.5 rounded-md bg-[#E6F4F1] text-[#00695C]">
+                    {feedbackToast}
+                  </span>
+                )}
               </div>
             </div>
 

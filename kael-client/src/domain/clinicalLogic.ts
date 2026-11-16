@@ -174,11 +174,12 @@ export function allocateFEFOStock(
     allocations.push({ batchNumber: batch.batchNumber, quantity: take });
   }
 
+  const shortfall = Math.abs(remaining) < 1e-6 ? 0 : remaining;
   return {
-    success: remaining === 0,
+    success: shortfall === 0,
     allocations,
     updatedBatches: sorted,
-    shortfall: remaining,
+    shortfall,
   };
 }
 
@@ -573,12 +574,17 @@ export function findMatchingPatients(
 
 
 export function getInvoiceOutstanding(invoice: InvoiceRecord): number {
-  if (invoice.pricingStatus === 'PENDING' || invoice.status === 'LUNAS') return 0;
-  const net = Math.max(0, invoice.subtotal - invoice.discountAmount - (invoice.depositAppliedAmount || 0));
-  const billed = isBpjsRecord(invoice)
-    ? invoice.claimRequestedAmount ?? net
-    : invoice.patientPayableAmount;
-  return Number.isFinite(billed) ? Math.max(0, billed - (invoice.totalReceivedAmount || 0)) : 0;
+  if (invoice.pricingStatus === 'PENDING') return 0;
+  const net = Math.max(0, (invoice.subtotal || 0) - (invoice.discountAmount || 0) - (invoice.depositAppliedAmount || 0));
+  const received = invoice.totalReceivedAmount || 0;
+  const claim = invoice.claimRequestedAmount;
+  const patientDue = invoice.patientPayableAmount;
+  const obligation = isBpjsRecord(invoice)
+    ? (typeof claim === 'number' && claim > 0 ? claim : net)
+    : (typeof patientDue === 'number' && patientDue > 0 ? patientDue : net);
+  const outstanding = Math.max(0, Math.round(obligation - received));
+  if ((invoice.status === 'LUNAS' || invoice.status === 'KLAIM_DISETUJUI') && outstanding <= 0) return 0;
+  return outstanding;
 }
 
 export function calculateFinancialSummary(

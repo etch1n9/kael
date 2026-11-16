@@ -7,7 +7,7 @@ import {
   SuperuserFacilityConfigSnapshot,
 } from '../domain/simrs.ts';
 import { kaelApi, WorkspacePayload } from '../utils/apiClient';
-import { UNIT_DESTINATION_CHOICES, UNIT_TYPE_CHOICES, masterCode, unitTypeForDestination } from '../utils/facilityMasters';
+import { UNIT_DESTINATION_CHOICES, UNIT_TYPE_CHOICES, masterCode, snapshotForFacility, unitTypeForDestination } from '../utils/facilityMasters';
 import { buildDefaultFacilityConfigSnapshot } from '../domain/platformEngine.ts';
 
 interface FacilityMastersPanelProps {
@@ -173,7 +173,7 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
         />
       </section>
 
-      {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p>}
+      {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">{error}</p>}
       <button type="button" disabled={saving} onClick={() => void save()} className="rounded-xl bg-[#0F2922] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60">
         {saving ? 'Menyimpan…' : 'Simpan master untuk akun lain'}
       </button>
@@ -195,12 +195,8 @@ export function FacilityMastersGate({
   const facilities = (workspace.allFacilities || []).filter((facility) => facility.active);
   const [chosen, setChosen] = useState(facilityCode || facilities[0]?.code || '');
   const facility = facilities.find((entry) => entry.code === chosen);
-  const stored = (workspace.facilityConfigHistory || []).find(
-    (entry) => entry.facilityCode === chosen && entry.lifecycleStage === 'ACTIVE',
-  );
-  const snapshot = facilityCode && workspace.activeFacilityConfig?.facilityCode === facilityCode
-    ? workspace.activeFacilityConfig
-    : stored || (facility ? buildDefaultFacilityConfigSnapshot(facility) : null);
+  const stored = snapshotForFacility(workspace.facilityConfigHistory, workspace.activeFacilityConfig, chosen);
+  const snapshot = stored || (facility ? buildDefaultFacilityConfigSnapshot(facility) : null);
   if (!facilities.length) {
     return <p className="rounded-xl border border-[#D5E3DF] bg-white p-4 text-sm dark:bg-[#0B211D]">Buat fasilitas dulu. Master unit mengikuti fasilitas, bukan akun superuser.</p>;
   }

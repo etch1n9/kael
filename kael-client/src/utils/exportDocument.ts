@@ -26,7 +26,10 @@ function escapeHtml(value: unknown): string {
 }
 
 function spreadsheetSafe(value: string): string {
-  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const trimmed = value.replace(/^[\s\uFEFF]+/, '');
+  if (/^-?\d+(\.\d+)?$/.test(trimmed.trim())) return value;
+  if (/^[=+\-@\t\r]/.test(trimmed)) return `'${value}`;
+  return value;
 }
 
 function extractCellValue<T>(row: T, col: ExportColumn<T>): string {
@@ -88,15 +91,17 @@ export function exportToExcelXml<T>(payload: ExportDocumentPayload<T>): void {
     .map((row) => {
       const cells = payload.columns
         .map((col) => {
-          const val = spreadsheetSafe(extractCellValue(row, col));
-          const numericClean = val.replace(/[^0-9.-]/g, '');
+          const raw = extractCellValue(row, col);
+          const trimmed = raw.trim();
+          const numericClean = raw.replace(/[^0-9.-]/g, '');
           const isStrictNum =
-            /^-?\d+(\.\d+)?$/.test(val.trim()) &&
-            !val.trim().startsWith('0') &&
+            /^-?\d+(\.\d+)?$/.test(trimmed) &&
+            !trimmed.startsWith('0') &&
             numericClean.length < 15;
           if (isStrictNum) {
-            return `<Cell ss:StyleID="sBody"><Data ss:Type="Number">${Number(val)}</Data></Cell>`;
+            return `<Cell ss:StyleID="sBody"><Data ss:Type="Number">${Number(trimmed)}</Data></Cell>`;
           }
+          const val = spreadsheetSafe(raw);
           return `<Cell ss:StyleID="sBody"><Data ss:Type="String">${escapeHtml(val)}</Data></Cell>`;
         })
         .join('');
@@ -279,7 +284,15 @@ function wrapCanvasText(
     }
   }
   if (current) lines.push(current);
-  return lines.slice(0, 3); // Max 3 lines per cell to keep table clean
+  if (lines.length <= 3) return lines;
+  const visible = lines.slice(0, 3);
+  const marker = '…';
+  let last = visible[2];
+  while (last.length > 0 && ctx.measureText(`${last}${marker}`).width > maxWidth) {
+    last = last.slice(0, -1);
+  }
+  visible[2] = `${last}${marker}`;
+  return visible;
 }
 
 /**
@@ -386,7 +399,7 @@ export function buildPdfBinaryFromJpegDataUrls(
 /**
  * 5. Export the table to a downloadable multi-page PDF (.pdf)
  */
-export function exportToPdf<T>(payload: ExportDocumentPayload<T>): void {
+export function exportToPdf<T>(payload: ExportDocumentPayload<T>): { format: 'pdf' | 'csv' } {
   const canvasW = 1684; // High-DPI A4 Landscape width
   const canvasH = 1190; // High-DPI A4 Landscape height
   const marginX = 64;
@@ -402,7 +415,10 @@ export function exportToPdf<T>(payload: ExportDocumentPayload<T>): void {
   measureCanvas.width = canvasW;
   measureCanvas.height = canvasH;
   const mCtx = measureCanvas.getContext('2d');
-  if (!mCtx) return;
+  if (!mCtx) {
+    exportToCsv(payload);
+    return { format: 'csv' };
+  }
 
   mCtx.font = '15px "Plus Jakarta Sans", "Segoe UI", Arial, sans-serif';
 
@@ -448,7 +464,7 @@ export function exportToPdf<T>(payload: ExportDocumentPayload<T>): void {
 
   if (pages.length > 40) {
     exportToCsv(payload);
-    return;
+    return { format: 'csv' };
   }
   const jpegPages: { dataUrl: string; widthPx: number; heightPx: number }[] = [];
   const pageCanvas = document.createElement('canvas');
@@ -618,6 +634,7 @@ export function exportToPdf<T>(payload: ExportDocumentPayload<T>): void {
   const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
   const dateTag = new Date().toISOString().slice(0, 10);
   triggerBlobDownload(blob, `${payload.filenameBase}_${dateTag}.pdf`);
+  return { format: 'pdf' };
 }
 
 /**

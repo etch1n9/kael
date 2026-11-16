@@ -4,9 +4,11 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{SecondsFormat, Utc};
 use serde_json::{Value, json};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Component, Path};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::bootstrap::{hash_password, verify_password};
@@ -110,6 +112,13 @@ pub fn next_document(rows: &[Value], field: &str, prefix: &str) -> u32 {
 }
 
 static EMPTY_ROWS: LazyLock<Vec<Value>> = LazyLock::new(Vec::new);
+static LOGIN_PERMITS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| tokio::sync::Semaphore::new(2));
+thread_local! {
+    static DB_DIRTY: Cell<bool> = const { Cell::new(false) };
+}
+fn take_dirty() -> bool {
+    DB_DIRTY.with(|flag| flag.replace(false))
+}
 static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
     hash_password("kael-login-dummy").unwrap_or_default()
 });
@@ -120,6 +129,7 @@ pub fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
         .unwrap_or(&EMPTY_ROWS)
 }
 pub fn array_mut<'a>(value: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
+    DB_DIRTY.with(|flag| flag.set(true));
     if !value.is_object() {
         *value = json!({});
     }
@@ -257,10 +267,6 @@ pub fn audit(app: &mut App, context: &RequestContext, action: &str, target: &str
         "action":action,"targetResource":target,"details":details});
     let rows = array_mut(&mut app.db, "auditLogs");
     rows.push(entry);
-    if rows.len() > 2000 {
-        let overflow = rows.len() - 2000;
-        rows.drain(0..overflow);
-    }
 }
 
 fn cap_sessions(app: &mut App) {
@@ -283,25 +289,30 @@ fn cap_sessions(app: &mut App) {
 
 pub fn save(app: &mut App) -> Result<(), ApiError> {
     cap_sessions(app);
-    if let Err(message) = app.store.save(&app.db) {
+    let packed = app
+        .sessions
+        .iter()
+        .map(|(token, session)| {
+            (
+                token.clone(),
+                (
+                    session.user_id.clone(),
+                    session.facility_code.clone(),
+                    session.expires_at,
+                ),
+            )
+        })
+        .collect();
+    if let Err(message) = app.store.save_all(&app.db, &packed) {
         let loaded = app.store.reload();
         if let Ok(value) = loaded {
             app.db = value;
         }
+        let _ = take_dirty();
         eprintln!("KAEL gagal menyimpan database: {message}");
         return Err(error(500, "Permintaan gagal disimpan server."));
     }
-    let packed = app.sessions.iter().map(|(token, session)| {
-        (token.clone(), (session.user_id.clone(), session.facility_code.clone(), session.expires_at))
-    }).collect();
-    if let Err(message) = app.store.save_sessions(&packed) {
-        let loaded = app.store.reload();
-        if let Ok(value) = loaded {
-            app.db = value;
-        }
-        eprintln!("KAEL gagal menyimpan sesi: {message}");
-        return Err(error(500, "Permintaan gagal disimpan server."));
-    }
+    let _ = take_dirty();
     Ok(())
 }
 
@@ -324,6 +335,7 @@ fn authorize(app: &mut App, headers: &HeaderMap, path: &str) -> Result<RequestCo
     let session = app.sessions.get(&token).cloned().ok_or(expired)?;
     if Utc::now().timestamp_millis() >= session.expires_at {
         app.sessions.remove(&token);
+        let _ = app.store.delete_session(&token);
         return Err(error(
             401,
             "Sesi tidak valid atau telah berakhir. Silakan login kembali.",
@@ -372,6 +384,8 @@ fn authorize(app: &mut App, headers: &HeaderMap, path: &str) -> Result<RequestCo
     }
     if facility_code.is_empty() && text(&user, "role") == "SUPERUSER" {
         if !(path == "/api/workspace"
+            || path == "/api/search"
+            || path == "/api/admin/export-backup"
             || path == "/api/auth/logout"
             || path == "/api/auth/switch-facility"
             || path.starts_with("/api/superuser/"))
@@ -409,7 +423,7 @@ struct LoginPrep {
     found: bool,
 }
 
-fn login_prepare(app: &mut App, body: &Value, ip: &str) -> Result<LoginPrep, ApiError> {
+fn login_prepare(app: &mut App, body: &Value, _ip: &str) -> Result<LoginPrep, ApiError> {
     let username = text(body, "username").trim().to_lowercase();
     let password = text(body, "password");
     if username.is_empty()
@@ -419,7 +433,7 @@ fn login_prepare(app: &mut App, body: &Value, ip: &str) -> Result<LoginPrep, Api
     {
         return Err(bad_request("Username dan kata sandi wajib diisi."));
     }
-    let key = format!("{ip}|{username}");
+    let key = username.clone();
     let now_ms = Utc::now().timestamp_millis();
     if let Some(attempt) = app.login_failures.get(&key) {
         if attempt.locked_until > now_ms {
@@ -447,6 +461,10 @@ fn login_prepare(app: &mut App, body: &Value, ip: &str) -> Result<LoginPrep, Api
 
 fn note_login_failure(app: &mut App, key: &str) {
     let now_ms = Utc::now().timestamp_millis();
+    app.login_failures.retain(|_, attempt| attempt.locked_until > now_ms || now_ms - attempt.window_start < 15 * 60 * 1000);
+    if app.login_failures.len() >= 4096 && !app.login_failures.contains_key(key) {
+        return;
+    }
     let attempt = app.login_failures.entry(key.to_owned()).or_insert(LoginAttempt {
         count: 0,
         window_start: now_ms,
@@ -470,7 +488,7 @@ fn login_commit(app: &mut App, body: &Value, prep: &LoginPrep, password_ok: bool
         return Err(login_denied());
     }
     app.login_failures.remove(&prep.key);
-    let username = prep.key.split('|').nth(1).unwrap_or("");
+    let username = prep.key.as_str();
     let index = array(&app.db, "users")
         .iter()
         .position(|user| {
@@ -511,8 +529,7 @@ fn login_commit(app: &mut App, body: &Value, prep: &LoginPrep, password_ok: bool
         .filter(|value| *value > 0)
         .unwrap_or(480)
         .min(1440);
-    let expires_at =
-        Utc::now().timestamp_millis() + (if remember { 7 * 1440 } else { configured }) * 60_000;
+    let expires_at = Utc::now().timestamp_millis() + configured * 60_000;
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     app.db["users"][index]["lastLoginAt"] = json!(now());
     let context = RequestContext {
@@ -559,32 +576,77 @@ fn login_denied() -> ApiError {
     )
 }
 
-fn query_window(query: &str) -> (usize, String, String) {
-    let mut limit = 500usize;
-    let mut from = String::new();
-    let mut to = String::new();
+struct QueryWindow {
+    limit: usize,
+    from: String,
+    to: String,
+    q: String,
+    patient_id: String,
+}
+
+fn query_unescape(value: &str) -> String {
+    let plus = value.replace('+', " ");
+    decode_path(&plus).unwrap_or(plus)
+}
+
+fn query_window(query: &str) -> QueryWindow {
+    let mut window = QueryWindow {
+        limit: 500,
+        from: String::new(),
+        to: String::new(),
+        q: String::new(),
+        patient_id: String::new(),
+    };
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let mut parts = pair.splitn(2, '=');
-        let key = parts.next().unwrap_or("");
-        let value = parts.next().unwrap_or("").trim().to_owned();
-        match key {
-            "limit" => limit = value.parse::<usize>().unwrap_or(500).clamp(1, 500),
-            "from" => from = value,
-            "to" => to = value,
+        let key = query_unescape(parts.next().unwrap_or(""));
+        let value = query_unescape(parts.next().unwrap_or("").trim());
+        match key.as_str() {
+            "limit" => window.limit = value.parse::<usize>().unwrap_or(500).clamp(1, 500),
+            "from" => window.from = value,
+            "to" => window.to = value,
+            "q" => window.q = value,
+            "patientId" => window.patient_id = value,
             _ => {}
         }
     }
-    (limit, from, to)
+    window
 }
 
 fn in_window(entry: &Value, from: &str, to: &str) -> bool {
-    let stamp = if text(entry, "createdAt").is_empty() { text(entry, "timestamp") } else { text(entry, "createdAt") };
+    let stamp = ["createdAt", "timestamp", "recordedAt", "publishedAt", "orderDate", "updatedAt"]
+        .iter()
+        .map(|key| text(entry, key))
+        .find(|value| !value.is_empty())
+        .unwrap_or("");
+    if stamp.is_empty() {
+        return true;
+    }
     (from.is_empty() || stamp >= from || stamp.starts_with(from))
         && (to.is_empty() || stamp <= to || stamp.starts_with(to))
 }
 
+fn stamp_of(entry: &Value) -> String {
+    ["createdAt", "timestamp", "recordedAt", "publishedAt", "orderDate", "updatedAt"]
+        .iter()
+        .map(|key| text(entry, key).to_owned())
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+}
+
 fn present(mut rows: Vec<Value>, limit: usize) -> Vec<Value> {
-    rows.reverse();
+    let terminal = |row: &Value| {
+        matches!(
+            text(row, "status"),
+            "SELESAI" | "BATAL" | "LUNAS" | "KLAIM_DISETUJUI"
+        )
+    };
+    rows.sort_by(|left, right| {
+        terminal(left)
+            .cmp(&terminal(right))
+            .then_with(|| stamp_of(right).cmp(&stamp_of(left)))
+            .then_with(|| text(right, "id").cmp(text(left, "id")))
+    });
     if rows.len() > limit {
         rows.truncate(limit);
     }
@@ -592,9 +654,11 @@ fn present(mut rows: Vec<Value>, limit: usize) -> Vec<Value> {
 }
 
 fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
-    let (limit, from_owned, to_owned) = query_window(query);
-    let from = from_owned.as_str();
-    let to = to_owned.as_str();
+    let window = query_window(query);
+    let limit = window.limit;
+    let from = window.from.as_str();
+    let to = window.to.as_str();
+    let patient_filter = window.patient_id.as_str();
     let user = &context.user;
     let code = &context.facility_code;
     let superuser = text(user, "role") == "SUPERUSER";
@@ -697,7 +761,19 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
         if code.is_empty() || !collection_access(key) {
             return vec![];
         }
-        present(array(&app.db, key).iter().filter(|entry| text(entry, "facilityCode") == code && in_window(entry, from, to)).cloned().collect(), limit)
+        present(array(&app.db, key).iter().filter(|entry| {
+            if text(entry, "facilityCode") != code.as_str() || !in_window(entry, from, to) {
+                return false;
+            }
+            if !patient_filter.is_empty()
+                && text(entry, "id") != patient_filter
+                && text(entry, "patientId") != patient_filter
+                && text(entry, "visitId") != patient_filter
+            {
+                return false;
+            }
+            true
+        }).cloned().collect(), limit)
     };
     let visible_users: Vec<Value> = array(&app.db, "users")
         .iter()
@@ -715,12 +791,10 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
     if !superuser {
         config["storagePath"] = json!("");
     }
-    let facility_history = if !superuser {
-        Vec::new()
-    } else if code.is_empty() {
+    let facility_history = if superuser {
         array(&app.db, "facilityConfigs").clone()
     } else {
-        scoped("facilityConfigs")
+        Vec::new()
     };
     let mut result = json!({"user":sanitize_user(&app.db,user,code),"roles":app.db["roles"],"activeFacility":facility,
         "facilityConfigHistory":facility_history,"evidenceRegistry":scoped("evidenceRegistry"),
@@ -788,10 +862,111 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
             ));
         }
     }
+    let payroll_access = superuser || has_any(&["SDM_ERP"]);
+    let people_access = superuser || has_any(&["SDM_ERP", "SDM_JADWAL"]);
     for key in ["attendance", "leaveRequests", "payrollRuns"] {
-        result[key] = json!(present(array(&app.db, key).iter().filter(|entry| (code.is_empty() || text(entry, "facilityCode") == code) && in_window(entry, from, to)).cloned().collect(), limit));
+        let allowed = if key == "payrollRuns" { payroll_access } else { people_access };
+        result[key] = json!(if allowed {
+            present(array(&app.db, key).iter().filter(|entry| (code.is_empty() || text(entry, "facilityCode") == code) && in_window(entry, from, to)).cloned().collect(), limit)
+        } else {
+            Vec::<Value>::new()
+        });
+    }
+    let inpatient_access = !code.is_empty() && has_any(&["RAWAT_INAP"]);
+    result["inpatientNotes"] = json!(if inpatient_access {
+        present(array(&app.db, "inpatientNotes").iter().filter(|entry| text(entry, "facilityCode") == code.as_str() && in_window(entry, from, to)).cloned().collect(), limit)
+    } else { Vec::<Value>::new() });
+    result["soapRevisions"] = json!(if clinical && !code.is_empty() {
+        present(array(&app.db, "soapRevisions").iter().filter(|entry| text(entry, "facilityCode") == code.as_str() && in_window(entry, from, to)).cloned().collect(), limit)
+    } else { Vec::<Value>::new() });
+    if patient_access && !code.is_empty() {
+        let mut patients = result["patients"].as_array().cloned().unwrap_or_default();
+        let mut known: std::collections::HashSet<String> = patients.iter().map(|row| text(row, "id").to_owned()).collect();
+        let referenced = result["visits"].as_array().cloned().unwrap_or_default();
+        for visit in referenced {
+            let id = text(&visit, "patientId").to_owned();
+            if id.is_empty() || !known.insert(id.clone()) {
+                continue;
+            }
+            if let Some(patient) = array(&app.db, "patients").iter().find(|row| text(row, "id") == id && text(row, "facilityCode") == code.as_str()) {
+                patients.push(patient.clone());
+            }
+        }
+        result["patients"] = json!(patients);
+    }
+    let identity = has_any(&["SEMUA_PASIEN", "PENDAFTARAN", "RME_DOKTER", "RAWAT_INAP", "IGD_TRIASE_EWS", "LABORATORIUM", "RADIOLOGI_RIS", "KIA_IMUNISASI", "GIGI_ODONTOGRAM", "PROLANIS_PRB", "BEDAH_IBS", "MCU_SURAT_MEDIS", "APOTEK"]);
+    if !identity && has_any(&["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG"]) {
+        for key in ["patients", "visits"] {
+            if let Some(rows) = result.get_mut(key).and_then(Value::as_array_mut) {
+                for row in rows {
+                    if let Some(object) = row.as_object_mut() {
+                        for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber"] {
+                            object.remove(field);
+                        }
+                        if key == "visits" {
+                            object.remove("vitals");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(rows) = result.get_mut("referrals").and_then(Value::as_array_mut) {
+        for row in rows {
+            let inbound = text(row, "destinationFacilityCode") == code.as_str() && text(row, "originFacilityCode") != code.as_str();
+            if inbound {
+                if let Some(object) = row.as_object_mut() {
+                    object.remove("nik");
+                    object.remove("bpjsNumber");
+                }
+            }
+        }
     }
     result
+}
+
+fn search_records(app: &App, context: &RequestContext, query: &str) -> Value {
+    let window = query_window(query);
+    let needle = window.q.trim().to_lowercase();
+    if needle.chars().count() < 2 || context.facility_code.is_empty() {
+        return json!({"patients":[],"visits":[],"invoices":[]});
+    }
+    let user = &context.user;
+    let code = &context.facility_code;
+    let has_any = |modules: &[&str]| modules.iter().any(|module| allows(app, user, code, module));
+    let patient_access = has_any(&["SEMUA_PASIEN", "PENDAFTARAN", "RME_DOKTER", "RAWAT_INAP", "IGD_TRIASE_EWS", "LABORATORIUM", "RADIOLOGI_RIS", "KASIR_AKUNTANSI", "KIA_IMUNISASI", "GIGI_ODONTOGRAM", "PROLANIS_PRB", "BEDAH_IBS", "MCU_SURAT_MEDIS"]);
+    let visit_access = patient_access || has_any(&["JADWAL_DOKTER", "APOTEK"]);
+    let finance = has_any(&["KASIR_AKUNTANSI", "KEUANGAN_OWNER", "NERACA_GL", "KLAIM_BPJS_PIUTANG", "JASA_MEDIS_REMUN"]);
+    let identity = has_any(&["SEMUA_PASIEN", "PENDAFTARAN", "RME_DOKTER", "RAWAT_INAP", "IGD_TRIASE_EWS", "LABORATORIUM", "RADIOLOGI_RIS", "KIA_IMUNISASI", "GIGI_ODONTOGRAM", "PROLANIS_PRB", "BEDAH_IBS", "MCU_SURAT_MEDIS", "APOTEK"]);
+    let redact = !identity && has_any(&["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG"]);
+    let find = |key: &str, allowed: bool, fields: &[&str]| -> Vec<Value> {
+        if !allowed {
+            return vec![];
+        }
+        let mut rows: Vec<Value> = array(&app.db, key)
+            .iter()
+            .filter(|row| {
+                text(row, "facilityCode") == code.as_str()
+                    && fields.iter().any(|field| text(row, field).to_lowercase().contains(&needle))
+            })
+            .cloned()
+            .collect();
+        if redact {
+            for row in &mut rows {
+                if let Some(object) = row.as_object_mut() {
+                    for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals"] {
+                        object.remove(field);
+                    }
+                }
+            }
+        }
+        present(rows, 30)
+    };
+    json!({
+        "patients": find("patients", patient_access, &["fullName", "mrNumber", "nik", "phone", "bpjsNumber"]),
+        "visits": find("visits", visit_access, &["patientName", "mrNumber", "nik", "queueNumber", "registrationNumber"]),
+        "invoices": find("invoices", finance, &["patientName", "mrNumber", "invoiceNumber"])
+    })
 }
 
 fn dispatch(
@@ -829,6 +1004,24 @@ fn dispatch(
     if method == "GET" && path == "/api/workspace" {
         return json_response(200, workspace(app, &context, query));
     }
+    if method == "GET" && path == "/api/search" {
+        return json_response(200, search_records(app, &context, query));
+    }
+    if method == "GET" && path == "/api/admin/export-backup" {
+        require_superuser(&context)?;
+        let mut dump = app.db.clone();
+        if let Some(users) = dump.get_mut("users").and_then(Value::as_array_mut) {
+            for user in users {
+                if let Some(object) = user.as_object_mut() {
+                    object.remove("passwordHash");
+                }
+            }
+        }
+        if let Some(object) = dump.as_object_mut() {
+            object.remove("sessions");
+        }
+        return json_response(200, dump);
+    }
     if method == "POST" && path == "/api/auth/switch-facility" {
         let code = normalize_facility(text(body, "facilityCode"));
         let facility = array(&app.db, "facilities")
@@ -853,10 +1046,10 @@ fn dispatch(
             &code,
             "Beralih fasilitas aktif.",
         );
-        save(app)?;
         if let Some(session) = app.sessions.get_mut(&context.token) {
-            session.facility_code = code;
+            session.facility_code = code.clone();
         }
+        save(app)?;
         let accessible: Vec<Value> = array(&app.db, "facilities")
             .iter()
             .filter(|entry| {
@@ -926,6 +1119,38 @@ fn api_headers(response: &mut Response, origin: Option<&str>, allowed: bool) {
     }
 }
 
+fn bounded_payload(value: &Value) -> Result<(), ApiError> {
+    fn walk(value: &Value, depth: usize) -> Result<(), ApiError> {
+        if depth > 12 {
+            return Err(bad_request("Struktur permintaan terlalu dalam."));
+        }
+        match value {
+            Value::Array(items) => {
+                if items.len() > 200 {
+                    return Err(bad_request("Satu permintaan maksimal 200 elemen."));
+                }
+                for item in items {
+                    walk(item, depth + 1)?;
+                }
+            }
+            Value::Object(map) => {
+                for (key, item) in map {
+                    if let Some(text) = item.as_str() {
+                        if text.chars().count() > 4000 {
+                            return Err(bad_request(format!("Isian {key} melebihi 4000 karakter.")));
+                        }
+                    } else {
+                        walk(item, depth + 1)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    walk(value, 0)
+}
+
 pub async fn serve(State(state): State<Arc<Shared>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path().trim_end_matches('/').to_owned();
@@ -944,7 +1169,10 @@ pub async fn serve(State(state): State<Arc<Shared>>, request: Request) -> Respon
             if !content_type.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json") {
                 Err(error(415, "Gunakan Content-Type application/json."))
             } else {
-                serde_json::from_slice::<Value>(&bytes).map_err(|_| bad_request("JSON permintaan tidak valid."))
+                match serde_json::from_slice::<Value>(&bytes) {
+                    Ok(value) => bounded_payload(&value).map(|_| value),
+                    Err(_) => Err(bad_request("JSON permintaan tidak valid.")),
+                }
             }
         }
     };
@@ -957,6 +1185,7 @@ pub async fn serve(State(state): State<Arc<Shared>>, request: Request) -> Respon
         api_headers(&mut result, origin, allowed);
         return result;
     }
+    let _ = take_dirty();
     let mut app = match state.app.lock() {
         Ok(app) => app,
         Err(_) => return response(Err(error(500, "Layanan belum tersedia."))),
@@ -973,11 +1202,11 @@ pub async fn serve(State(state): State<Arc<Shared>>, request: Request) -> Respon
         }
         let method = if parts.method == "HEAD" { "GET" } else { parts.method.as_str() };
         let result = dispatch(&mut app, method, &path, parts.uri.query().unwrap_or(""), &parts.headers, &body);
-        if result.is_err() {
+        if result.is_err() && take_dirty() {
             let loaded = app.store.reload();
-        if let Ok(value) = loaded {
-            app.db = value;
-        }
+            if let Ok(value) = loaded {
+                app.db = value;
+            }
         }
         result
     });
@@ -1007,9 +1236,15 @@ async fn login_outside_lock(state: &Shared, body: &Value, ip: String) -> ApiResu
     };
     let password = prep.password.clone();
     let hash = prep.hash.clone();
+    let permit = match tokio::time::timeout(Duration::from_secs(2), LOGIN_PERMITS.acquire()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => return Err(error(500, "Layanan belum tersedia.")),
+        Err(_) => return Err(error(429, "Server sedang memverifikasi banyak login. Coba lagi sesaat lagi.")),
+    };
     let ok = tokio::task::spawn_blocking(move || verify_password(&password, &hash))
         .await
         .unwrap_or(false);
+    drop(permit);
     let mut app = state.app.lock().map_err(|_| error(500, "Layanan belum tersedia."))?;
     login_commit(&mut app, body, &prep, ok)
 }

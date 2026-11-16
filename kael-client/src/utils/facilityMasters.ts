@@ -5,6 +5,17 @@ import {
   SuperuserFacilityConfigSnapshot,
 } from '../domain/simrs.ts';
 
+export function snapshotForFacility<T extends { facilityCode: string; lifecycleStage?: string }>(
+  history: T[] | undefined,
+  active: T | null | undefined,
+  facilityCode: string,
+): T | undefined {
+  return (
+    history?.find((entry) => entry.facilityCode === facilityCode && entry.lifecycleStage === 'ACTIVE')
+    || (active && active.facilityCode === facilityCode ? active : undefined)
+  );
+}
+
 export const VISIT_UNIT_TYPES = ['RUANG_PRAKTIK', 'POLIKLINIK_SPESIALIS', 'IGD'] as const;
 
 export const UNIT_DESTINATION_CHOICES = [

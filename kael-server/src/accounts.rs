@@ -227,7 +227,6 @@ fn change_role(
         role_id,
         &format!("Memperbarui peran {}.", text(&role, "name")),
     );
-    save(app)?;
     if role["active"] != true {
         let user_ids: Vec<String> = array(&app.db, "users")
             .iter()
@@ -243,6 +242,7 @@ fn change_role(
             revoke_sessions(app, &user_id);
         }
     }
+    save(app)?;
     json_response(200, role)
 }
 
@@ -542,10 +542,10 @@ fn update_user(app: &mut App, context: &RequestContext, user_id: &str, body: &Va
         user_id,
         &format!("Memperbarui akun @{username}."),
     );
-    save(app)?;
     if changed {
         revoke_sessions(app, user_id);
     }
+    save(app)?;
     json_response(200, sanitize_user(&app.db, &user, &context.facility_code))
 }
 
@@ -575,8 +575,8 @@ fn delete_user(app: &mut App, context: &RequestContext, user_id: &str) -> ApiRes
             text(&user, "username")
         ),
     );
-    save(app)?;
     revoke_sessions(app, user_id);
+    save(app)?;
     no_content()
 }
 
@@ -721,6 +721,9 @@ fn delete_facility(app: &mut App, context: &RequestContext, code: &str) -> ApiRe
         "bridgingLogs",
         "evidenceRegistry",
         "idempotencyRecords",
+        "attendance",
+        "leaveRequests",
+        "payrollRuns",
     ];
     let has_data = collections.iter().any(|key| {
         array(&app.db, key)

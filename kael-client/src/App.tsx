@@ -120,12 +120,12 @@ export default function App() {
   const commandDialogRef = useRef<HTMLDialogElement>(null);
   const commandTriggerRef = useRef<HTMLButtonElement>(null);
   const [commandQuery, setCommandQuery] = useState('');
+  const [remoteQueue, setRemoteQueue] = useState<VisitQueueItem[]>([]);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mainViewportRef = useRef<HTMLElement>(null);
-  const [miniFlyoutCategory, setMiniFlyoutCategory] = useState<NavGroupKey | null>(null);
   // Open each navigation group when its destination is selected.
   const [expandedGroups, setExpandedGroups] = useState<Record<NavGroupKey, boolean>>({
     PENDAFTARAN_ADMISI: false,
@@ -160,7 +160,6 @@ export default function App() {
   const navigateAndExpandCategory = useCallback((targetModule: ModuleKey) => {
     setActiveModule(targetModule);
     setMobileNavOpen(false);
-    setMiniFlyoutCategory(null);
     const groupByModule: Partial<Record<ModuleKey, NavGroupKey>> = {
       SEMUA_PASIEN: 'PENDAFTARAN_ADMISI',
       PENDAFTARAN: 'PENDAFTARAN_ADMISI',
@@ -219,7 +218,6 @@ export default function App() {
     if (session) return;
     setMobileNavOpen(false);
     setCommandOpen(false);
-    setMiniFlyoutCategory(null);
   }, [session]);
 
   useEffect(() => {
@@ -257,6 +255,25 @@ export default function App() {
     localStorage.setItem('kael_theme_dark', String(darkMode));
   }, [darkMode]);
 
+  useEffect(() => {
+    const q = commandQuery.trim();
+    const facility = session?.activeFacility?.code || '';
+    if (!commandOpen || q.length < 2 || !session?.token || !facility) {
+      setRemoteQueue([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      kaelApi.searchRecords(session.token, facility, q, controller.signal)
+        .then((found) => setRemoteQueue(found.visits || []))
+        .catch(() => undefined);
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [commandOpen, commandQuery, session]);
+
   const workspaceRequest = useRef<AbortController | null>(null);
   const fetchActiveWorkspace = useCallback(async (activeSession: StoredSession) => {
     workspaceRequest.current?.abort();
@@ -279,6 +296,8 @@ export default function App() {
         saveStoredSession(null);
         setSession(null);
         setWorkspace(null);
+      } else if (err instanceof ApiError && err.status === 403) {
+        setWorkspace(null);
       }
     } finally {
       if (!request.signal.aborted) setIsLoadingWorkspace(false);
@@ -289,6 +308,39 @@ export default function App() {
     if (session) void fetchActiveWorkspace(session);
     return () => workspaceRequest.current?.abort();
   }, [session, fetchActiveWorkspace]);
+
+  useEffect(() => {
+    if (!session) return;
+    const user = workspace?.user || session.user;
+    const facility = workspace ? workspace.activeFacility : session.activeFacility;
+    if (!facility) return;
+    const config = workspace?.activeFacilityConfig || buildDefaultFacilityConfigSnapshot(facility);
+    const allowedKeys = resolveFacilityNavigation(config, user, facility.code).map((item) => item.moduleKey);
+    const nextVisible = allowedKeys.some((key) => key === activeModule) ? activeModule : allowedKeys[0];
+    if (nextVisible && nextVisible !== activeModule) setActiveModule(nextVisible);
+  }, [session, workspace, activeModule]);
+
+  useEffect(() => {
+    const expiresAt = session?.expiresAt;
+    if (typeof expiresAt !== 'number') return;
+    const clearIfExpired = () => {
+      if (Date.now() < expiresAt) return;
+      workspaceRequest.current?.abort();
+      saveStoredSession(null);
+      setSession(null);
+      setWorkspace(null);
+    };
+    clearIfExpired();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') clearIfExpired();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    const intervalId = window.setInterval(clearIfExpired, 30_000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.clearInterval(intervalId);
+    };
+  }, [session]);
 
   // Workspace keyboard shortcuts: command palette, sidebar, and module navigation.
   useEffect(() => {
@@ -301,11 +353,9 @@ export default function App() {
         e.preventDefault();
         if (!isNarrowLayout) setIsSidebarCollapsed((prev) => !prev);
         else { setIsSidebarCollapsed(false); setMobileNavOpen((prev) => !prev); }
-        setMiniFlyoutCategory(null);
       }
       if (e.key === 'Escape') {
         setCommandOpen(false);
-        setMiniFlyoutCategory(null);
       }
       if (e.altKey && session && workspace) {
         const keyMap: Record<string, ModuleKey> = {
@@ -430,7 +480,12 @@ export default function App() {
           {!workspace?.allFacilities.length && (
             <p className="mb-5 rounded-xl border border-[#D5E3DF] bg-white dark:bg-[#0B211D] p-4 text-sm">Mulai dengan membuat fasilitas, lalu atur role dan akun pengguna sesuai kebutuhan.</p>
           )}
-          {workspaceError && <p role="alert" className="mb-4 text-sm text-red-700 dark:text-red-300">{workspaceError}</p>}
+          {workspaceError && (
+            <p role="alert" className="mb-4 text-sm text-red-700 dark:text-red-300">
+              {workspaceError}
+              {workspace && <span className="block mt-1">Data mungkin tidak terbaru.</span>}
+            </p>
+          )}
           {workspace ? (
             <Suspense fallback={<p role="status">Memuat pengelolaan platform…</p>}>
               <SuperuserControlModule token={session.token} facilityCode="" workspace={workspace} onRefreshWorkspace={() => fetchActiveWorkspace(session)} />
@@ -493,6 +548,16 @@ export default function App() {
   ];
 
   const topItem = allowedNavItems.find((i) => i.key === 'DASHBOARD');
+  const activeQueueMatches = [...(workspace?.visits ?? []), ...remoteQueue.filter((visit) => !(workspace?.visits ?? []).some((known) => known.id === visit.id))].filter((visit) => {
+    if (visit.status === 'SELESAI' || visit.status === 'BATAL') return false;
+    return (
+      !commandQuery ||
+      visit.patientName.toLowerCase().includes(commandQuery.toLowerCase()) ||
+      visit.mrNumber.toLowerCase().includes(commandQuery.toLowerCase()) ||
+      visit.nik.includes(commandQuery)
+    );
+  });
+  const activeQueueShown = activeQueueMatches.slice(0, 8);
 
   return (
     <div className="kael-workspace h-dvh w-full overflow-hidden bg-[#F3F8F6] dark:bg-[#061714] text-[#0F2922] dark:text-[#ECF7F4] flex flex-col">
@@ -536,10 +601,7 @@ export default function App() {
                   <button
                     type="button"
                     data-testid="sidebar-toggle-btn"
-                    onClick={() => {
-                      setIsSidebarCollapsed(false);
-                      setMiniFlyoutCategory(null);
-                    }}
+                    onClick={() => setIsSidebarCollapsed(false)}
                     title="Perluas menu kiri (Ctrl+B)"
                     aria-label="Perluas menu kiri"
                     className="p-1.5 rounded-xl text-[#9BC4BC] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
@@ -560,17 +622,16 @@ export default function App() {
                       onClick={() => {
                         setActiveModule('DASHBOARD');
                         setMobileNavOpen(false);
-                        setMiniFlyoutCategory(null);
                       }}
                       title={topItem.label}
                       aria-label={topItem.label}
                       className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer ${
-                        activeModule === 'DASHBOARD' && !miniFlyoutCategory
+                        visibleModule === 'DASHBOARD'
                           ? 'bg-white/15 text-white font-semibold'
                           : 'text-[#9BC4BC] hover:bg-white/10 hover:text-white'
                       }`}
                     >
-                      {activeModule === 'DASHBOARD' && !miniFlyoutCategory && (
+                      {visibleModule === 'DASHBOARD' && (
                         <span
                           aria-hidden="true"
                           className="absolute left-0 top-2 bottom-2 w-1 rounded-full bg-[#E5A93C]"
@@ -591,20 +652,14 @@ export default function App() {
                       icon: Activity,
                     };
                     const IconComp = meta.icon;
-                    const isCategoryActive =
-                      items.some((i) => i.key === activeModule) || miniFlyoutCategory === cat;
+                    const isCategoryActive = items.some((i) => i.key === visibleModule);
 
                     return (
                       <button
                         key={cat}
                         type="button"
                         data-testid={`nav-mini-cat-${cat}`}
-                        onClick={() => {
-                          if (!items.some((i) => i.key === activeModule)) {
-                            setActiveModule(items[0].key);
-                          }
-                          setMiniFlyoutCategory((prev) => (prev === cat ? null : cat));
-                        }}
+                        onClick={() => navigateAndExpandCategory(items[0].key)}
                         title={NAV_GROUP_TITLES[cat]}
                         aria-label={NAV_GROUP_TITLES[cat]}
                         className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer ${
@@ -629,54 +684,6 @@ export default function App() {
                 </nav>
               </div>
 
-              {/* Floating Subcategory Flyout when a Category is clicked in Mini Mode */}
-              {miniFlyoutCategory && (
-                <div
-                  data-testid="mini-sidebar-flyout"
-                  className="kael-nav-flyout absolute top-16 rounded-2xl bg-[#0C3B33] dark:bg-[#072620] border border-[#1E5B4F] shadow-xl p-2.5 space-y-1 z-50"
-                >
-                  <div className="px-2.5 py-1.5 flex items-center justify-between border-b border-[#164E44]">
-                    <span className="text-caption font-bold uppercase tracking-wider text-[#9BC4BC]">
-                      {NAV_GROUP_TITLES[miniFlyoutCategory]}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setMiniFlyoutCategory(null)}
-                      className="text-caption text-[#9BC4BC] hover:text-white cursor-pointer"
-                    >
-                      Tutup
-                    </button>
-                  </div>
-                  <div className="pt-1 space-y-0.5">
-                    {allowedNavItems
-                      .filter((item) => item.category === miniFlyoutCategory)
-                      .map((item) => {
-                        const SubIcon = item.icon;
-                        const isSubActive = activeModule === item.key;
-                        return (
-                          <button
-                            key={item.key}
-                            type="button"
-                            onClick={() => {
-                              setActiveModule(item.key);
-                              setMobileNavOpen(false);
-                              setMiniFlyoutCategory(null);
-                            }}
-                            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-left text-xs transition-colors cursor-pointer ${
-                              isSubActive
-                                ? 'bg-white/15 text-white font-semibold'
-                                : 'text-[#C8E4DD] hover:bg-white/10 hover:text-white'
-                            }`}
-                          >
-                            <SubIcon className="w-3.5 h-3.5 shrink-0 text-[#80CBC4]" />
-                            <span className="truncate">{item.label}</span>
-                          </button>
-                        );
-                      })}
-                  </div>
-                </div>
-              )}
-
               {/* Minimalist Bottom User Avatar & Logout Icon */}
               <div className="p-2.5 border-t border-[#185247] bg-[#0A332C] flex flex-col items-center gap-2">
                 <div
@@ -690,7 +697,7 @@ export default function App() {
                   onClick={handleLogout}
                   title="Keluar dari akun"
                   aria-label="Keluar dari akun"
-                  className="w-full py-1.5 px-1 rounded-xl bg-white hover:bg-[#EBF4F1] text-[#0C3B33] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer"
+                  className="w-full py-1.5 px-1 rounded-xl bg-white hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] text-[#0C3B33] dark:hover:text-[#E6F4F1] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer"
                 >
                   <LogOut className="w-3.5 h-3.5" />
                   <span className="text-caption font-semibold leading-none">Keluar</span>
@@ -782,12 +789,12 @@ export default function App() {
                         type="button"
                         onClick={() => { setActiveModule('DASHBOARD'); setMobileNavOpen(false); }}
                         className={`group relative w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer ${
-                          activeModule === 'DASHBOARD'
+                          visibleModule === 'DASHBOARD'
                             ? 'bg-white/10 text-white font-semibold'
                             : 'text-[#C8E4DD] hover:bg-white/5 hover:text-white'
                         }`}
                       >
-                        {activeModule === 'DASHBOARD' && (
+                        {visibleModule === 'DASHBOARD' && (
                           <span
                             aria-hidden="true"
                             className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-full bg-[#E5A93C]"
@@ -823,7 +830,7 @@ export default function App() {
                           <div className="space-y-0.5 pl-1">
                             {items.map((item) => {
                               const IconComp = item.icon;
-                              const isActive = activeModule === item.key;
+                              const isActive = visibleModule === item.key;
                               return (
                                 <button
                                   key={item.key}
@@ -877,7 +884,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="w-full py-2.5 px-3 rounded-xl bg-white hover:bg-[#EBF4F1] text-[#0C3B33] text-xs font-semibold text-center transition-colors shadow-xs cursor-pointer"
+                  className="w-full py-2.5 px-3 rounded-xl bg-white hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] text-[#0C3B33] dark:hover:text-[#E6F4F1] text-xs font-semibold text-center transition-colors shadow-xs cursor-pointer"
                 >
                   Keluar dari akun
                 </button>
@@ -915,7 +922,7 @@ export default function App() {
                 type="button"
                 onClick={() => setCommandOpen(true)}
                 aria-label="Cari pasien atau menu"
-                className="px-3 py-1.5 text-xs font-medium rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#EBF4F1] transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                className="px-3 py-1.5 text-xs font-medium rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
               >
                 <Search className="w-3.5 h-3.5 text-[#00897B]" />
                 <span className="hidden md:inline">Cari pada daftar...</span>
@@ -929,7 +936,7 @@ export default function App() {
                 onClick={() => session && fetchActiveWorkspace(session)}
                 aria-label="Muat ulang data"
                 disabled={isLoadingWorkspace}
-                className="px-3.5 py-1.5 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] hover:bg-[#EBF4F1] dark:hover:bg-[#11302A] text-xs font-medium text-[#0F2922] dark:text-white flex items-center gap-1.5 cursor-pointer"
+                className="px-3.5 py-1.5 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] text-xs font-medium text-[#0F2922] dark:text-white flex items-center gap-1.5 cursor-pointer"
               >
                 <RefreshCw
                   className={`w-3.5 h-3.5 text-[#00897B] ${
@@ -943,7 +950,7 @@ export default function App() {
                 type="button"
                 onClick={() => setDarkMode((prev) => !prev)}
                 aria-label="Ubah Tema Terang atau Gelap"
-                className="p-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] hover:bg-[#EBF4F1] dark:hover:bg-[#11302A] text-[#0F2922] dark:text-white cursor-pointer"
+                className="p-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] text-[#0F2922] dark:text-white cursor-pointer"
               >
                 {darkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
               </button>
@@ -959,7 +966,7 @@ export default function App() {
               >
                 <span>
                   {workspaceError}
-                  {workspace && <span className="block mt-1">Data terakhir masih ditampilkan. Muat ulang untuk mendapatkan data terbaru.</span>}
+                  {workspace && <span className="block mt-1">Data mungkin tidak terbaru. Data terakhir masih ditampilkan.</span>}
                 </span>
                 <button
                   type="button"
@@ -1211,7 +1218,7 @@ export default function App() {
                           setActiveModule(item.key);
                           setCommandOpen(false);
                         }}
-                        className="text-left px-3 py-2 rounded-xl border border-[#E2ECE8] dark:border-[#183831] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] flex items-center justify-between cursor-pointer"
+                        className="text-left px-3 py-2 rounded-xl border border-[#E2ECE8] dark:border-[#183831] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] text-[#0F2922] dark:text-[#E6F4F1] flex items-center justify-between cursor-pointer"
                       >
                         <span className="min-w-0 font-medium">{item.label}</span>
                         <span className="shrink-0 font-mono text-xs text-[#00897B] ml-2">
@@ -1227,32 +1234,29 @@ export default function App() {
                   Pasien Antrean Aktif • {effectiveFacility.code}
                 </div>
                 <div className="space-y-1">
-                  {workspace.visits
-                    .filter(
-                      (v) =>
-                        !commandQuery ||
-                        v.patientName.toLowerCase().includes(commandQuery.toLowerCase()) ||
-                        v.mrNumber.toLowerCase().includes(commandQuery.toLowerCase()) ||
-                        v.nik.includes(commandQuery)
-                    )
-                    .map((v) => (
-                      <button
-                        key={v.id}
-                        type="button"
-                        onClick={() => {
-                          handleOpenVisitInRme(v);
-                          setCommandOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] flex items-center justify-between cursor-pointer"
-                      >
-                        <span>
-                          <strong>{v.patientName}</strong> · {v.mrNumber}
-                        </span>
-                        <span className="font-mono text-caption text-[#00897B] font-semibold">
-                          Buka RME · {v.queueNumber}
-                        </span>
-                      </button>
-                    ))}
+                  {activeQueueShown.map((v) => (
+                    <button
+                      key={v.id}
+                      type="button"
+                      onClick={() => {
+                        handleOpenVisitInRme(v);
+                        setCommandOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] text-[#0F2922] dark:text-[#E6F4F1] flex items-center justify-between cursor-pointer"
+                    >
+                      <span>
+                        <strong>{v.patientName}</strong> · {v.mrNumber}
+                      </span>
+                      <span className="font-mono text-caption text-[#00897B] font-semibold">
+                        Buka RME · {v.queueNumber}
+                      </span>
+                    </button>
+                  ))}
+                  {activeQueueMatches.length > activeQueueShown.length && (
+                    <p className="px-3 py-1 text-caption text-[#52736B] dark:text-[#86B5A9]">
+                      {activeQueueMatches.length - activeQueueShown.length} antrean lain tidak ditampilkan. Persempit pencarian.
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -1270,7 +1274,7 @@ export default function App() {
                           handleSwitchFacility(f.code);
                           setCommandOpen(false);
                         }}
-                        className="px-2.5 py-1 text-xs font-mono rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] cursor-pointer"
+                        className="px-2.5 py-1 text-xs font-mono rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] text-[#0F2922] dark:text-[#E6F4F1] cursor-pointer"
                       >
                         {f.code}
                       </button>

@@ -149,6 +149,7 @@ export const KpiSparklineCanvas: React.FC<KpiSparklineCanvasProps> = ({
   const axisMeasureRef = useRef<HTMLDivElement>(null);
   const dateMeasureRef = useRef<HTMLDivElement>(null);
   const calloutMeasureRef = useRef<HTMLDivElement>(null);
+  const pointRefs = useRef<Array<SVGGElement | null>>([]);
   const [measurements, setMeasurements] = useState<ChartMeasurements | null>(null);
 
   const masukValues = series.map((s) => s.masuk);
@@ -441,7 +442,7 @@ export const KpiSparklineCanvas: React.FC<KpiSparklineCanvasProps> = ({
           width={chartWidth}
           height={chartHeight}
           className="block w-full min-w-0"
-          role="img"
+          role="group"
           aria-label={`${title} — Pertumbuhan ${activeMetrics.formattedPeriodBadge}`}
         >
           <defs>
@@ -551,62 +552,6 @@ export const KpiSparklineCanvas: React.FC<KpiSparklineCanvasProps> = ({
                 points={toPolyline(primaryCoords)}
               />
 
-              {/* Hover Hit Columns & Subtle Active Node */}
-              {primaryCoords.map((pt, idx) => {
-                const delta = activeDeltas[idx];
-                const isLast = idx === primaryCoords.length - 1;
-                const isHovered = hoveredIdx === idx;
-
-                return (
-                  <g
-                    key={series[idx]?.dateKey || idx}
-                    onMouseEnter={() => setHoveredIdx(idx)}
-                    onMouseLeave={() => setHoveredIdx(null)}
-                    className="cursor-pointer"
-                  >
-                    <rect
-                      x={pt.x - plotW / (series.length * 2)}
-                      y={topPad}
-                      width={plotW / series.length}
-                      height={plotH}
-                      fill="transparent"
-                    />
-
-                    {isHovered && (
-                      <>
-                        <line
-                          x1={pt.x}
-                          y1={topPad}
-                          x2={pt.x}
-                          y2={baselineY}
-                          stroke={primaryStroke}
-                          strokeDasharray="3 3"
-                          strokeOpacity={0.45}
-                        />
-                        <circle
-                          cx={pt.x}
-                          cy={pt.y}
-                          r={4.5}
-                          fill={primaryDot}
-                          stroke="#FFFFFF"
-                          strokeWidth={1.5}
-                        />
-                        {idx > 0 && !isLast && showCallout && (
-                          <text
-                            x={Math.min(chartWidth - measurements.calloutWidth / 2, Math.max(measurements.calloutWidth / 2, pt.x))}
-                            y={Math.max(calloutHeight, pt.y - labelHeight * 0.5)}
-                            textAnchor="middle"
-                            className="text-caption font-mono font-bold fill-[#00796B] dark:fill-[#38E8D6]"
-                          >
-                            {formatPercentBadge(delta)}
-                          </text>
-                        )}
-                      </>
-                    )}
-                  </g>
-                );
-              })}
-
               {/* Signature Endpoint Marker & Bold Percentage Callout matching erp_finance_chart_types_5_2_746aa7a7.png */}
               {lastPrimary && (
                 <g>
@@ -638,6 +583,86 @@ export const KpiSparklineCanvas: React.FC<KpiSparklineCanvasProps> = ({
             </>
           )}
 
+          {primaryCoords.map((pt, idx) => {
+            const delta = activeDeltas[idx];
+            const isLast = idx === primaryCoords.length - 1;
+            const isSelected = hoveredIdx === idx;
+            const pointLabel = series[idx]?.dateKey || String(idx);
+            return (
+              <g
+                key={`point-${series[idx]?.dateKey || idx}`}
+                ref={(node) => {
+                  pointRefs.current[idx] = node;
+                }}
+                role="button"
+                tabIndex={0}
+                aria-label={`Tanggal ${pointLabel}, nilai ${formatRupiah(pt.val)}`}
+                aria-pressed={isSelected}
+                onMouseEnter={() => setHoveredIdx(idx)}
+                onMouseLeave={() => setHoveredIdx(null)}
+                onClick={() => setHoveredIdx(idx)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setHoveredIdx(idx);
+                    return;
+                  }
+                  const step =
+                    event.key === 'ArrowRight' || event.key === 'ArrowDown'
+                      ? 1
+                      : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+                        ? -1
+                        : 0;
+                  if (step === 0) return;
+                  event.preventDefault();
+                  const next = Math.min(primaryCoords.length - 1, Math.max(0, idx + step));
+                  setHoveredIdx(next);
+                  pointRefs.current[next]?.focus();
+                }}
+                className="cursor-pointer"
+              >
+                <rect
+                  x={pt.x - plotW / Math.max(1, series.length * 2)}
+                  y={topPad}
+                  width={plotW / Math.max(1, series.length)}
+                  height={plotH}
+                  fill="transparent"
+                />
+                {isSelected && (
+                  <>
+                    <line
+                      x1={pt.x}
+                      y1={topPad}
+                      x2={pt.x}
+                      y2={baselineY}
+                      stroke={primaryStroke}
+                      strokeDasharray="3 3"
+                      strokeOpacity={0.45}
+                    />
+                    <circle
+                      cx={pt.x}
+                      cy={pt.y}
+                      r={4.5}
+                      fill={primaryDot}
+                      stroke="#FFFFFF"
+                      strokeWidth={1.5}
+                    />
+                    {idx > 0 && !isLast && showCallout && (
+                      <text
+                        x={Math.min(chartWidth - measurements.calloutWidth / 2, Math.max(measurements.calloutWidth / 2, pt.x))}
+                        y={Math.max(calloutHeight, pt.y - labelHeight * 0.5)}
+                        textAnchor="middle"
+                        className="text-caption font-mono font-bold fill-[#00796B] dark:fill-[#38E8D6]"
+                      >
+                        {formatPercentBadge(delta)}
+                      </text>
+                    )}
+                  </>
+                )}
+              </g>
+            );
+          })}
+
           {/* X-Axis Date Labels */}
           {series.map((pt, idx) => {
             if (!visibleDateLabels.has(idx)) return null;
@@ -660,6 +685,29 @@ export const KpiSparklineCanvas: React.FC<KpiSparklineCanvasProps> = ({
             );
           })}
         </svg>}
+      </div>
+      <div className="max-h-28 overflow-auto rounded-lg border border-[#E2ECE8] dark:border-[#183831]">
+        <table className="w-full border-collapse text-caption text-[#0F2922] dark:text-[#E6F4F1]">
+          <caption className="px-2 py-1 text-left text-[#52736B] dark:text-[#86B5A9]">Rincian tanggal dan nilai</caption>
+          <thead>
+            <tr className="text-[#52736B] dark:text-[#86B5A9]">
+              <th className="px-2 py-0.5 text-left font-semibold">Tanggal</th>
+              <th className="px-2 py-0.5 text-right font-semibold">Masuk</th>
+              <th className="px-2 py-0.5 text-right font-semibold">Keluar</th>
+              <th className="px-2 py-0.5 text-right font-semibold">Neto</th>
+            </tr>
+          </thead>
+          <tbody>
+            {series.map((point) => (
+              <tr key={point.dateKey}>
+                <th scope="row" className="px-2 py-0.5 text-left font-mono font-medium">{point.dateKey}</th>
+                <td className="px-2 py-0.5 text-right font-mono">{formatRupiah(point.masuk)}</td>
+                <td className="px-2 py-0.5 text-right font-mono">{formatRupiah(point.keluar)}</td>
+                <td className="px-2 py-0.5 text-right font-mono">{formatRupiah(point.neto)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

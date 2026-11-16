@@ -33,6 +33,7 @@ export function SdmErpModule({
   const [note, setNote] = useState('');
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [amount, setAmount] = useState('');
+  const [leaveStatus, setLeaveStatus] = useState<'PENDING' | 'APPROVED' | 'REJECTED'>('PENDING');
   const [message, setMessage] = useState('');
 
   const tabs: { key: SdmTab; label: string; icon: typeof Clock }[] = [
@@ -52,6 +53,7 @@ export function SdmErpModule({
         note: note.trim(),
         date,
         amount: Number(amount || 0),
+        status: kind === 'leave' ? leaveStatus : undefined,
       });
       setNote('');
       setAmount('');
@@ -89,7 +91,7 @@ export function SdmErpModule({
             className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold transition-colors ${
               activeTab === key
                 ? 'bg-[#00897B] text-white'
-                : 'bg-white dark:bg-[#0B211D] border border-[#D5E3DF] dark:border-[#1E473F] text-[#0F2922] dark:text-white hover:bg-[#EBF4F1]'
+                : 'bg-white dark:bg-[#0B211D] border border-[#D5E3DF] dark:border-[#1E473F] text-[#0F2922] dark:text-white hover:bg-[#EBF4F1] dark:hover:bg-[#12352E]'
             }`}
           >
             <Icon className="h-3.5 w-3.5" />
@@ -105,7 +107,7 @@ export function SdmErpModule({
         className="rounded-2xl border border-[#E2ECE8] dark:border-[#183831] bg-white dark:bg-[#0B211D] p-4 space-y-3"
       >
         {activeTab === 'ABSENSI' && <StaffForm title="Catat kehadiran" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount={false} onSubmit={save} message={message} />}
-        {activeTab === 'CUTI' && <StaffForm title="Catat cuti atau izin" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount={false} onSubmit={save} message={message} />}
+        {activeTab === 'CUTI' && <StaffForm title="Catat cuti atau izin" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount={false} leaveStatus={leaveStatus} setLeaveStatus={setLeaveStatus} onSubmit={save} message={message} />}
         {activeTab === 'PENGGAJIAN' && <StaffForm title="Catat komponen gaji" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount onSubmit={save} message={message} />}
         <ul className="space-y-1 text-xs text-[#52736B] dark:text-[#86B5A9]">
           {(rows || []).slice(0, 20).map((row) => <li key={row.id}>{row.date || row.createdAt.slice(0, 10)} · {row.staffName}{row.note ? ` · ${row.note}` : ''}{row.amount ? ` · Rp ${row.amount}` : ''}</li>)}
@@ -127,6 +129,8 @@ function StaffForm(props: {
   amount: string;
   setAmount: (value: string) => void;
   showAmount: boolean;
+  leaveStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
+  setLeaveStatus?: (value: 'PENDING' | 'APPROVED' | 'REJECTED') => void;
   onSubmit: (event: React.FormEvent) => void;
   message: string;
 }) {
@@ -134,10 +138,17 @@ function StaffForm(props: {
     <form onSubmit={props.onSubmit} className="space-y-2">
       <h2 className="text-sm font-bold text-[#0F2922] dark:text-white">{props.title}</h2>
       <div className="grid gap-2 sm:grid-cols-2">
-        <input required value={props.staffName} onChange={(event) => props.setStaffName(event.target.value)} placeholder="Nama pegawai" list="sdm-staff" className="rounded-lg border px-3 py-2 text-xs" />
-        <input type="date" required value={props.date} onChange={(event) => props.setDate(event.target.value)} className="rounded-lg border px-3 py-2 text-xs" />
-        <input value={props.note} onChange={(event) => props.setNote(event.target.value)} placeholder="Catatan" className="rounded-lg border px-3 py-2 text-xs sm:col-span-2" />
-        {props.showAmount && <input inputMode="numeric" value={props.amount} onChange={(event) => props.setAmount(event.target.value)} placeholder="Nominal rupiah" className="rounded-lg border px-3 py-2 text-xs" />}
+        <input required value={props.staffName} onChange={(event) => props.setStaffName(event.target.value)} placeholder="Nama pegawai" list="sdm-staff" className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+        <input type="date" required value={props.date} onChange={(event) => props.setDate(event.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+        <input value={props.note} onChange={(event) => props.setNote(event.target.value)} placeholder="Catatan" className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs sm:col-span-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+        {props.showAmount && <input inputMode="numeric" value={props.amount} onChange={(event) => props.setAmount(event.target.value)} placeholder="Nominal rupiah" className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />}
+        {props.leaveStatus && props.setLeaveStatus && (
+          <select value={props.leaveStatus} onChange={(event) => props.setLeaveStatus?.(event.target.value as 'PENDING' | 'APPROVED' | 'REJECTED')} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+            <option value="PENDING">Menunggu</option>
+            <option value="APPROVED">Disetujui</option>
+            <option value="REJECTED">Ditolak</option>
+          </select>
+        )}
       </div>
       <button type="submit" className="rounded-xl bg-[#00897B] px-4 py-2 text-xs font-semibold text-white">Simpan</button>
       {props.message && <p className="text-xs">{props.message}</p>}

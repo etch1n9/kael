@@ -68,6 +68,39 @@ pub fn record_books(app: &mut App, ctx: &RequestContext, entry: &Value) {
     array_mut(&mut app.db, "doubleEntryJournals").push(journal);
 }
 
+fn balanced_journal(app: &mut App, ctx: &RequestContext, description: &str, reference: &str, debit_code: &str, debit_name: &str, credit_code: &str, credit_name: &str, amount: f64) {
+    let amount = amount.round();
+    if !amount.is_finite() || amount <= 0.0 {
+        return;
+    }
+    let timestamp = now();
+    let day = if timestamp.len() >= 10 { timestamp[..10].replace('-', "") } else { "00000000".into() };
+    let head = format!("GL/{}/{}/", ctx.facility_code.chars().take(4).collect::<String>(), day);
+    let sequence = next_document(array(&app.db, "doubleEntryJournals"), "journalNumber", &head);
+    let journal = json!({"id":id("gl"),"facilityCode":ctx.facility_code,"journalNumber":format!("{head}{sequence:04}"),"timestamp":timestamp,"eventType":"INVENTORY","sourceTransactionId":reference,"description":description,"lines":[{"accountCode":debit_code,"accountName":debit_name,"debit":amount,"credit":0},{"accountCode":credit_code,"accountName":credit_name,"debit":0,"credit":amount}],"totalDebit":amount,"totalCredit":amount,"isBalanced":true,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
+    array_mut(&mut app.db, "doubleEntryJournals").push(journal);
+}
+
+pub fn inventory_receipt(app: &mut App, ctx: &RequestContext, amount: f64, description: &str, reference: &str) {
+    let amount = amount.round();
+    if !amount.is_finite() || amount <= 0.0 {
+        return;
+    }
+    let entry = accounting_entry(app, ctx, "1-1400", "Persediaan Obat & BMHP", "ASET", "PERSEDIAAN", description, amount, reference);
+    array_mut(&mut app.db, "accountingEntries").push(entry);
+    balanced_journal(app, ctx, description, reference, "1-1400", "Persediaan Obat & BMHP", "2-1100", "Utang Dagang Distributor PBF", amount);
+}
+
+pub fn post_cogs(app: &mut App, ctx: &RequestContext, amount: f64, description: &str, reference: &str) {
+    let amount = amount.round();
+    if !amount.is_finite() || amount <= 0.0 {
+        return;
+    }
+    let entry = accounting_entry(app, ctx, "5-1400", "HPP Obat dan BMHP", "BEBAN", "HPP_FARMASI", description, amount, reference);
+    array_mut(&mut app.db, "accountingEntries").push(entry);
+    balanced_journal(app, ctx, description, reference, "5-1400", "HPP Obat dan BMHP", "1-1400", "Persediaan Obat & BMHP", amount);
+}
+
 pub fn append_service_charge(
     app: &mut App,
     ctx: &RequestContext,
@@ -87,7 +120,7 @@ pub fn append_service_charge(
     }
     let quantity = if quantity.is_finite() && quantity > 0.0 { quantity } else { 1.0 };
     let unit_price = unit_price.round();
-    let item = json!({"id":id("bli"),"category":category,"description":description,"quantity":quantity,"unitPrice":unit_price,"subtotal":(quantity * unit_price).round()});
+    let item = json!({"id":id("bli"),"key":format!("{category}:{description}"),"category":category,"description":description,"quantity":quantity,"unitPrice":unit_price,"subtotal":(quantity * unit_price).round()});
     if let Some(index) = array(&app.db, "invoices").iter().position(|invoice| {
         text(invoice, "facilityCode") == ctx.facility_code
             && text(invoice, "patientId") == patient_id
@@ -252,11 +285,21 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
         );
         record_books(app, ctx, &entry);
     }
-    for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
-        text(v, "id") == text(&invoice, "visitId") && text(v, "facilityCode") == ctx.facility_code
-    }) {
-        visit["status"] = json!("SELESAI");
-        visit["updatedAt"] = json!(timestamp);
+    let visit_id = text(&invoice, "visitId");
+    let orders_open = ["labOrders", "pharmacyOrders", "radiologyOrders"].iter().any(|key| {
+        array(&app.db, key).iter().any(|row| {
+            text(row, "visitId") == visit_id
+                && text(row, "facilityCode") == ctx.facility_code
+                && !matches!(text(row, "status"), "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED" | "BATAL" | "")
+        })
+    });
+    if !orders_open {
+        for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
+            text(v, "id") == visit_id && text(v, "facilityCode") == ctx.facility_code
+        }) {
+            visit["status"] = json!("SELESAI");
+            visit["updatedAt"] = json!(timestamp);
+        }
     }
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     audit(
@@ -297,46 +340,42 @@ fn set_pricing(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Val
     }
     let submitted = body["items"].as_array().filter(|items| !items.is_empty())
         .ok_or_else(|| bad_request("Masukkan seluruh rincian tagihan, minimal satu item. Tarif nol harus diisi secara eksplisit."))?;
-    let mut items = vec![];
-    let mut subtotal = 0.0;
+    let existing_items = array(&invoice, "items").clone();
+    let mut remaining = array(&invoice, "unpricedItems").clone();
+    if existing_items.is_empty() && remaining.is_empty() {
+        return Err(bad_request("Tagihan tidak memiliki komponen yang dapat ditetapkan harganya."));
+    }
+    let mut items = existing_items;
     for item in submitted {
-        let quantity = item["quantity"]
-            .as_f64()
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .ok_or_else(|| bad_request("Kuantitas item harus berupa angka lebih dari nol."))?;
+        let component_id = text(item, "id");
+        let key = text(item, "key");
+        if component_id.is_empty() && key.is_empty() {
+            return Err(bad_request("Harga harus merujuk ID atau kunci komponen tagihan yang sudah tersimpan."));
+        }
         let unit_price = item["unitPrice"].as_f64().filter(|value| value.is_finite() && *value >= 0.0)
             .ok_or_else(|| bad_request("Tarif setiap item harus diisi dengan angka nonnegatif, termasuk nol bila tanpa biaya."))?;
-        let category = text(item, "category");
-        if ![
-            "PENDAFTARAN",
-            "KONSULTASI",
-            "TINDAKAN",
-            "FARMASI",
-            "LABORATORIUM",
-            "RADIOLOGI",
-            "KAMAR_INAP",
-            "BEDAH_IBS",
-            "MCU",
-        ]
-        .contains(&category)
-            || text(item, "description").trim().is_empty()
-            || !(quantity * unit_price).is_finite()
-        {
-            return Err(bad_request(
-                "Kategori, deskripsi, dan nilai item tagihan tidak valid.",
-            ));
-        }
-        items.push(json!({"id":id("bli"),"category":category,"description":text(item,"description").trim(),"quantity":quantity,"unitPrice":unit_price,"subtotal":quantity*unit_price}));
-        subtotal += quantity * unit_price;
-        if !subtotal.is_finite() {
-            return Err(bad_request(
-                "Total nilai tagihan melebihi batas angka yang dapat dicatat.",
-            ));
+        if let Some(existing) = items.iter_mut().find(|row| (!component_id.is_empty() && text(row, "id") == component_id) || (!key.is_empty() && text(row, "key") == key)) {
+            let quantity = number(existing, "quantity");
+            if !quantity.is_finite() || quantity <= 0.0 {
+                return Err(bad_request("Kuantitas komponen tersimpan tidak valid."));
+            }
+            existing["unitPrice"] = json!(unit_price);
+            existing["subtotal"] = json!(quantity * unit_price);
+        } else if let Some(index) = remaining.iter().position(|row| (!key.is_empty() && text(row, "key") == key) || (!component_id.is_empty() && (text(row, "id") == component_id || text(row, "key") == component_id))) {
+            let pending = remaining.remove(index);
+            let quantity = number(&pending, "quantity");
+            let quantity = if quantity.is_finite() && quantity > 0.0 { quantity } else { 1.0 };
+            items.push(json!({"id": if text(&pending, "id").is_empty() { json!(id("bli")) } else { pending["id"].clone() }, "key": if text(&pending, "key").is_empty() { json!(key) } else { pending["key"].clone() }, "category": pending["category"], "description": pending["description"], "quantity": quantity, "unitPrice": unit_price, "subtotal": quantity * unit_price}));
+        } else {
+            return Err(bad_request("Komponen tagihan tidak dikenal. Penetapan harga tidak boleh menambah atau mengganti komponen."));
         }
     }
+    if !items.iter().map(|item| number(item, "subtotal")).sum::<f64>().is_finite() {
+        return Err(bad_request("Total nilai tagihan melebihi batas angka yang dapat dicatat."));
+    }
     invoice["items"] = json!(items);
-    invoice["unpricedItems"] = json!([]);
-    invoice["pricingStatus"] = json!("COMPLETE");
+    invoice["unpricedItems"] = json!(remaining);
+    invoice["pricingStatus"] = json!(if remaining.is_empty() { "COMPLETE" } else { "PENDING" });
     invoice["pricingSource"] = json!("MANUAL");
     invoice["pricedAt"] = json!(now());
     invoice["pricedBy"] = ctx.user["id"].clone();
@@ -514,7 +553,11 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     }
     let timestamp = now();
     let net = (number(&invoice, "subtotal") - number(&invoice, "discountAmount")).max(0.0);
-    let settled = received >= net;
+    let final_settlement = body["final"] == true;
+    let settled = received >= net || (final_settlement && received > 0.0);
+    if final_settlement && received < net {
+        invoice["claimAdjustment"] = json!((net - received).round());
+    }
     invoice["status"] = json!(if settled { "LUNAS" } else { "KLAIM_DIAJUKAN" });
     invoice["paidAt"] = if settled {
         json!(timestamp)

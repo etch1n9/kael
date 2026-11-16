@@ -178,13 +178,6 @@ svg.lucide {
   max-inline-size: none;
 }
 
-.kael-nav-flyout {
-  inset-inline-start: calc(100% + var(--kael-overlay-gap));
-  inline-size: min(var(--kael-popover-inline-size), calc(100vi - var(--kael-sidebar-rail-inline-size) - var(--kael-gutter) * 2));
-  max-block-size: calc(100dvb - var(--kael-gutter) * 2);
-  overflow-y: auto;
-}
-
 .kael-command-dialog {
   inline-size: min(var(--kael-dialog-max-inline-size), calc(100vi - var(--kael-gutter) * 2));
   max-block-size: calc(100dvb - var(--kael-gutter) * 2);

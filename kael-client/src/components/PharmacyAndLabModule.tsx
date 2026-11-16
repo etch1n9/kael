@@ -329,12 +329,38 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
       );
     });
   }, [mutations, mutationTypeFilter, mutationMedFilter, searchQuery]);
-  const orderPage = usePage(workspace.pharmacyOrders);
+  const queryText = searchQuery.trim().toLowerCase();
+  const visiblePharmacyOrders = useMemo(() => workspace.pharmacyOrders.filter((order) => !queryText || `${order.patientName} ${order.mrNumber} ${order.items.map((item) => item.medicationName).join(' ')}`.toLowerCase().includes(queryText)), [workspace.pharmacyOrders, queryText]);
+  const visibleLabOrders = useMemo(() => workspace.labOrders.filter((order) => !queryText || `${order.patientName} ${order.mrNumber} ${order.specimenCode} ${order.clinicalNotes}`.toLowerCase().includes(queryText)), [workspace.labOrders, queryText]);
+  const visiblePurchaseOrders = useMemo(() => (workspace.purchaseOrders || []).filter((order) => !queryText || `${order.poNumber || ''} ${order.supplierName || ''} ${order.status || ''}`.toLowerCase().includes(queryText)), [workspace.purchaseOrders, queryText]);
+  const visibleRadiologyOrders = useMemo(() => (workspace.radiologyOrders || []).filter((order) => !queryText || `${order.patientName || ''} ${order.examName || ''} ${order.accessionNumber || ''}`.toLowerCase().includes(queryText)), [workspace.radiologyOrders, queryText]);
+  const orderPage = usePage(visiblePharmacyOrders);
   const opnamePage = usePage(stockOpnameRows);
   const mutationPage = usePage(filteredMutations);
-  const labPage = usePage(workspace.labOrders);
-  const purchasePage = usePage(workspace.purchaseOrders || []);
-  const radiologyPage = usePage(workspace.radiologyOrders || []);
+  const labPage = usePage(visibleLabOrders);
+  const purchasePage = usePage(visiblePurchaseOrders);
+  const radiologyPage = usePage(visibleRadiologyOrders);
+
+  useEffect(() => {
+    if (!selectedLabOrder) return;
+    const fresh = workspace.labOrders.find((order) => order.id === selectedLabOrder.id);
+    if (!fresh) {
+      setSelectedLabOrder(null);
+      setLabValues({});
+      setLabNotes('');
+      setLabReferences({});
+      return;
+    }
+    if (fresh.status !== selectedLabOrder.status || JSON.stringify(fresh.parameters) !== JSON.stringify(selectedLabOrder.parameters)) {
+      setSelectedLabOrder(fresh);
+      setLabValues(Object.fromEntries(fresh.parameters.map((parameter) => [parameter.code, parameter.value])));
+      setLabNotes(fresh.clinicalNotes);
+      setLabReferences(Object.fromEntries(fresh.parameters.map((parameter) => [parameter.code, {
+        min: typeof parameter.refMin === 'number' ? parameter.refMin : '', max: typeof parameter.refMax === 'number' ? parameter.refMax : '',
+        source: parameter.referenceSource || '', context: parameter.methodPopulation || '', verified: parameter.referenceVerified === true,
+      }])));
+    }
+  }, [workspace.labOrders, selectedLabOrder]);
 
   const selectLabForEdit = (order: LabOrder) => {
     setSelectedLabOrder(order);
@@ -441,6 +467,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
     medName: string
   ) => {
     setFeedback(null);
+    if (!Number.isFinite(actualStock) || actualStock < 0) { setFeedback({ type: 'error', text: 'Jumlah fisik harus angka nol atau lebih. Kosongkan bukan berarti nol.' }); return; }
     if (!opnameGlobalReason.trim()) { setFeedback({ type: 'error', text: 'Isi alasan penyesuaian stok yang sebenarnya.' }); return; }
     try {
       await kaelApi.stockOpnameMedication(token, facilityCode, medicationId, {
@@ -1084,7 +1111,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
           </div>
 
           <div className="min-w-0 grid grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-form-min-inline-size)),1fr))] gap-4">
-            {orderPage.bar}{orderPage.rows.map((order) => {
+            {orderPage.rows.map((order) => {
               const isDispensed = order.status === 'DISERAHKAN';
               const totalResepValue = order.items.reduce(
                 (s, i) => s + i.quantity * i.unitPrice,
@@ -1242,6 +1269,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                 </div>
               );
             })}
+            {orderPage.bar}
           </div>
         </div>
       )}
@@ -1293,7 +1321,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               </thead>
               <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
                 {stockOpnameRows.length === 0 && <tr><td colSpan={9} className="px-4 py-5 text-slate-500">Belum ada batch obat.</td></tr>}
-                {opnamePage.bar}{opnamePage.rows.map((row) => {
+                {opnamePage.rows.map((row) => {
                   const hasPhysicalCount = Object.prototype.hasOwnProperty.call(opnameDrafts, row.rowKey);
                   const hasDiff = hasPhysicalCount && row.diffQty !== 0;
                   return (
@@ -1400,6 +1428,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                 })}
               </tbody>
             </table>
+            {opnamePage.bar}
           </div>
             {/* Batch Opname Save Bar */}
             <div className="flex flex-wrap items-end justify-between gap-3 p-3 sm:p-4 border-t border-[#E2ECE8] dark:border-[#183831] text-xs">
@@ -1759,7 +1788,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
-                  {mutationPage.bar}{mutationPage.rows.map((mut) => {
+                  {mutationPage.rows.map((mut) => {
                     const isIncoming = mut.quantityChange > 0;
                     return (
                       <tr
@@ -1836,6 +1865,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   })}
                 </tbody>
               </table>
+              {mutationPage.bar}
             </div>
           </div>
         </div>
@@ -1939,7 +1969,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
             )}
 
             <div className="space-y-2.5">
-              {labPage.bar}{labPage.rows.map((order) => {
+              {labPage.rows.map((order) => {
                 const isSelected = selectedLabOrder?.id === order.id;
                 return (
                   <button
@@ -1965,6 +1995,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </button>
                 );
               })}
+              {labPage.bar}
             </div>
           </div>
 
@@ -2212,7 +2243,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
-                  {purchasePage.bar}{purchasePage.rows.map((po) => (
+                  {purchasePage.rows.map((po) => (
                     <tr key={po.id}>
                       <td className="py-3 px-4 font-mono">
                         <div className="font-bold text-[#00897B]">{po.poNumber}</div>
@@ -2242,6 +2273,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   ))}
                 </tbody>
               </table>
+              {purchasePage.bar}
             </div>
           </div>
         </div>
@@ -2344,7 +2376,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               </h2>
             </div>
             <div className="divide-y divide-[#E2ECE8] dark:divide-[#183831] text-xs">
-              {radiologyPage.bar}{radiologyPage.rows.map((ro) => (
+              {radiologyPage.rows.map((ro) => (
                 <div key={ro.id} className="p-4 space-y-1.5">
                   <div className="flex items-center justify-between font-mono">
                     <span className="font-bold text-[#00897B]">
@@ -2361,6 +2393,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   <div className="font-semibold text-[#00897B]">Kesan: {ro.impression}</div>
                 </div>
               ))}
+              {radiologyPage.bar}
             </div>
           </div>
         </div>

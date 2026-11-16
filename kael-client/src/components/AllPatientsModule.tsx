@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Users,
   Search,
@@ -74,6 +74,7 @@ export function AllPatientsModule({
   onNavigateModule,
 }: AllPatientsModuleProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [remotePatients, setRemotePatients] = useState<Patient[]>([]);
   const [regFilter, setRegFilter] = useState<RegDateFilter>('SEMUA');
   const [regStartDate, setRegStartDate] = useState('');
   const [regEndDate, setRegEndDate] = useState('');
@@ -97,6 +98,7 @@ export function AllPatientsModule({
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(
     null
   );
+  const [modalError, setModalError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   // Form state for Create/Edit Patient
@@ -124,6 +126,22 @@ export function AllPatientsModule({
   const [queueVitals, setQueueVitals] = useState<VitalSigns>(blankVitals);
   const [queueError, setQueueError] = useState<string | null>(null);
   const todayDate = localDateKey(new Date());
+
+  useEffect(() => {
+    setPatientPage(0);
+  }, [
+    searchQuery,
+    regFilter,
+    regStartDate,
+    regEndDate,
+    visitFilter,
+    visitStartDate,
+    visitEndDate,
+    genderFilter,
+    guarantorFilter,
+    polyFilter,
+    clinicalFlagFilter,
+  ]);
 
   const patientStatsMap = useMemo(() => {
     const map = new Map<
@@ -176,6 +194,32 @@ export function AllPatientsModule({
     return map;
   }, [patients, visits]);
 
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2) {
+      setRemotePatients([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      kaelApi.searchRecords(token, activeFacility.code, q, controller.signal)
+        .then((found) => setRemotePatients(found.patients || []))
+        .catch(() => undefined);
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, token, activeFacility.code]);
+
+  const patientsForSearch = useMemo(() => {
+    const map = new Map(patients.map((patient) => [patient.id, patient]));
+    for (const extra of remotePatients) {
+      if (!map.has(extra.id)) map.set(extra.id, extra);
+    }
+    return Array.from(map.values());
+  }, [patients, remotePatients]);
+
   const filteredPatients = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const isDateWithinDays = (targetIsoDate: string, days: number) => {
@@ -190,7 +234,7 @@ export function AllPatientsModule({
       return ym === todayDate.slice(0, 7);
     };
 
-    return patients.filter((p) => {
+    return patientsForSearch.filter((p) => {
       const stat = patientStatsMap.get(p.id);
       const regDate = localDateKey(p.createdAt || '');
 
@@ -264,7 +308,7 @@ export function AllPatientsModule({
       return true;
     });
   }, [
-    patients,
+    patientsForSearch,
     patientStatsMap,
     searchQuery,
     genderFilter,
@@ -331,6 +375,7 @@ export function AllPatientsModule({
     setFormAddress('');
     setFormAllergies('');
     setFormChronic('');
+    setModalError(null);
     setShowAddModal(true);
   };
 
@@ -346,19 +391,18 @@ export function AllPatientsModule({
     setFormAddress(patient.address);
     setFormAllergies(patient.allergies.join(', '));
     setFormChronic(patient.chronicConditions.join(', '));
+    setModalError(null);
     setShowAddModal(true);
   };
 
   const handleSavePatient = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formFullName.trim() || !/^\d{16}$/.test(formNik.trim()) || !formBirthDate || !formGender) {
-      setFeedback({
-        type: 'error',
-        message: 'Lengkapi nama, NIK 16 digit, tanggal lahir, dan jenis kelamin pasien.',
-      });
+      setModalError('Lengkapi nama, NIK 16 digit, tanggal lahir, dan jenis kelamin pasien.');
       return;
     }
     setSubmitting(true);
+    setModalError(null);
     setFeedback(null);
     try {
       const payload: Partial<Patient> = {
@@ -394,12 +438,10 @@ export function AllPatientsModule({
         });
       }
       setShowAddModal(false);
+      setModalError(null);
       await onRefreshWorkspace();
     } catch (err) {
-      setFeedback({
-        type: 'error',
-        message: err instanceof Error ? err.message : 'Gagal menyimpan data pasien.',
-      });
+      setModalError(err instanceof Error ? err.message : 'Gagal menyimpan data pasien.');
     } finally {
       setSubmitting(false);
     }
@@ -1019,8 +1061,8 @@ export function AllPatientsModule({
             Menampilkan {Math.min(filteredPatients.length, patientPage * 50 + 1)}–{Math.min(filteredPatients.length, patientPage * 50 + 50)} dari <strong>{filteredPatients.length}</strong>
           </span>
           <span className="inline-flex gap-2">
-            <button type="button" disabled={patientPage === 0} onClick={() => setPatientPage((page) => Math.max(0, page - 1))} className="rounded border px-2 py-1 disabled:opacity-40">Sebelumnya</button>
-            <button type="button" disabled={(patientPage + 1) * 50 >= filteredPatients.length} onClick={() => setPatientPage((page) => page + 1)} className="rounded border px-2 py-1 disabled:opacity-40">Berikutnya</button>
+            <button type="button" disabled={patientPage === 0} onClick={() => setPatientPage((page) => Math.max(0, page - 1))} className="rounded border border-[#C5D9D3] dark:border-[#5F8F84] px-2 py-1 text-[#0F2922] dark:text-[#E6F4F1] disabled:opacity-40 disabled:border-[#C5D9D3] disabled:text-[#52736B] disabled:dark:border-[#6F9F94] disabled:dark:text-[#D5E8E2]">Sebelumnya</button>
+            <button type="button" disabled={(patientPage + 1) * 50 >= filteredPatients.length} onClick={() => setPatientPage((page) => page + 1)} className="rounded border border-[#C5D9D3] dark:border-[#5F8F84] px-2 py-1 text-[#0F2922] dark:text-[#E6F4F1] disabled:opacity-40 disabled:border-[#C5D9D3] disabled:text-[#52736B] disabled:dark:border-[#6F9F94] disabled:dark:text-[#D5E8E2]">Berikutnya</button>
           </span>
         </div>
       </div>
@@ -1109,7 +1151,7 @@ export function AllPatientsModule({
 
       {/* Modal Tambah / Edit Pasien */}
       {showAddModal && (
-        <ModalDialog onClose={() => setShowAddModal(false)} label={editingPatient ? 'Edit Data Pasien' : 'Tambah Pasien Baru'}>
+        <ModalDialog onClose={() => { setModalError(null); setShowAddModal(false); }} label={editingPatient ? 'Edit Data Pasien' : 'Tambah Pasien Baru'}>
           <form
             onSubmit={handleSavePatient}
             className="bg-white dark:bg-[#0B211D] border border-[#D5E3DF] dark:border-[#1E473F] rounded-2xl break-words max-w-[var(--kael-dialog-max-inline-size)] w-full min-w-0 max-h-full flex flex-col overflow-hidden shadow-2xl"
@@ -1122,13 +1164,19 @@ export function AllPatientsModule({
               </h3>
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
+                onClick={() => { setModalError(null); setShowAddModal(false); }}
                 aria-label="Tutup dialog pasien"
                 className="shrink-0 p-2 rounded-lg border border-[#D5E3DF] text-[#52736B]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {modalError && (
+              <p role="alert" className="mx-4 mt-3 sm:mx-5 rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/40 p-3 text-xs text-red-700 dark:text-red-300">
+                {modalError}
+              </p>
+            )}
 
             <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5 grid [&>*]:min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-field-min-inline-size)),1fr))] gap-3 text-xs">
               <div>
@@ -1230,7 +1278,7 @@ export function AllPatientsModule({
             <div className="shrink-0 px-4 py-3 sm:px-5 border-t border-[#E2ECE8] dark:border-[#183831] bg-[#F8FBFA] dark:bg-[#081916] flex flex-wrap justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
+                onClick={() => { setModalError(null); setShowAddModal(false); }}
                 className="px-4 py-2 rounded-xl border border-[#D5E3DF] text-xs font-medium"
               >
                 Batal

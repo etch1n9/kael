@@ -91,6 +91,12 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null
   );
+  useEffect(() => {
+    setSelectedInvoice((current) => current ? workspace.invoices.find((invoice) => invoice.id === current.id) || null : current);
+  }, [workspace.invoices]);
+  useEffect(() => {
+    setSelectedBridgingLog((current) => current ? workspace.bridgingLogs.find((entry) => entry.id === current.id) || null : current);
+  }, [workspace.bridgingLogs]);
 
   const filteredInvoices = useMemo(() => {
     const q = invSearch.trim().toLowerCase();
@@ -231,14 +237,20 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
       'Deskripsi',
       'Nominal IDR',
     ];
+    const cell = (value: string | number) => {
+      const text = String(value ?? '');
+      const trimmed = text.trimStart();
+      if (/^-?\d+(\.\d+)?$/.test(trimmed.trim())) return trimmed.trim();
+      return /^[=+\-@]/.test(trimmed) ? `'${text.replace(/"/g, '""')}` : text.replace(/"/g, '""');
+    };
     const rows = workspace.accountingEntries.map((acc) => [
-      acc.entryNumber,
-      acc.timestamp,
-      acc.accountCode,
-      acc.accountName,
-      acc.type,
-      acc.category,
-      `"${acc.description.replace(/"/g, '""')}"`,
+      cell(acc.entryNumber),
+      cell(acc.timestamp),
+      cell(acc.accountCode),
+      cell(acc.accountName),
+      cell(acc.type),
+      cell(acc.category),
+      `"${cell(acc.description)}"`,
       acc.amount,
     ]);
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
