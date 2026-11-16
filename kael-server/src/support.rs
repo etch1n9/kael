@@ -121,11 +121,14 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         let mut med = array(&app.db, "medications")[med_index].clone();
         let batch = text(item, "batchNumber").trim().to_uppercase();
         let expiry = text(item, "expiryDate");
+        let today = &timestamp[..10];
         if receive
-            && (batch.is_empty() || chrono::NaiveDate::parse_from_str(expiry, "%Y-%m-%d").is_err())
+            && (batch.is_empty()
+                || chrono::NaiveDate::parse_from_str(expiry, "%Y-%m-%d").is_err()
+                || expiry < today)
         {
             return Err(bad_request(
-                "Batch dan tanggal kedaluwarsa diperlukan untuk penerimaan PBF.",
+                "Batch dan tanggal kedaluwarsa aktif diperlukan untuk penerimaan PBF.",
             ));
         }
         let item_subtotal = qty * price;
@@ -189,10 +192,14 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             .find(|row| text(row, "code") == ctx.facility_code)
             .map(|row| default(row, "tenantId", &ctx.facility_code).to_owned())
             .unwrap_or_else(|| ctx.facility_code.clone());
-        let journal = json!({"id":id("gl"),"tenantId":tenant,"facilityCode":ctx.facility_code,"journalNumber":format!("GL/{}/{}/{}",ctx.facility_code.chars().take(4).collect::<String>(),timestamp[..10].replace('-',""),array(&app.db,"doubleEntryJournals").len()+1),"timestamp":timestamp,"eventType":"INVENTORY_RECEIVED_PBF","sourceTransactionId":po_number,"description":format!("Penerimaan Faktur PBF {supplier} ({invoice})"),"lines":[{"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP (HNA + PPN)","accountCategory":"ASSET","debit":total.round(),"credit":0,"costCenterCode":"CC-FAR"},{"accountCode":"2-1100","accountName":"Utang Dagang Distributor PBF","accountCategory":"LIABILITY","debit":0,"credit":total.round(),"costCenterCode":"CC-FAR"}],"totalDebit":total.round(),"totalCredit":total.round(),"isBalanced":total>0.0,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
+        let gl_head = format!(
+            "GL/{}/{}/",
+            ctx.facility_code.chars().take(4).collect::<String>(),
+            timestamp[..10].replace('-', "")
+        );
+        let gl_seq = next_document(array(&app.db, "doubleEntryJournals"), "journalNumber", &gl_head);
+        let journal = json!({"id":id("gl"),"tenantId":tenant,"facilityCode":ctx.facility_code,"journalNumber":format!("{gl_head}{gl_seq:04}"),"timestamp":timestamp,"eventType":"INVENTORY_RECEIVED_PBF","sourceTransactionId":po_number,"description":format!("Penerimaan Faktur PBF {supplier} ({invoice})"),"lines":[{"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP (HNA + PPN)","accountCategory":"ASSET","debit":total.round(),"credit":0,"costCenterCode":"CC-FAR"},{"accountCode":"2-1100","accountName":"Utang Dagang Distributor PBF","accountCategory":"LIABILITY","debit":0,"credit":total.round(),"costCenterCode":"CC-FAR"}],"totalDebit":total.round(),"totalCredit":total.round(),"isBalanced":total>0.0,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
         array_mut(&mut app.db, "doubleEntryJournals").push(journal.clone());
-        let entry = json!({"id":id("acc"),"facilityCode":ctx.facility_code,"entryNumber":journal["journalNumber"],"timestamp":timestamp,"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP","type":"PENGELUARAN","category":"PERSEDIAAN","description":journal["description"],"amount":total.round(),"referenceId":po_number});
-        array_mut(&mut app.db, "accountingEntries").push(entry);
         journal
     } else {
         Value::Null
@@ -357,15 +364,26 @@ fn bridging(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
 
 fn evidence(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if text(&ctx.user, "role") != "SUPERUSER" {
-        require_service(app, ctx, &["SUPERUSER_CONTROL", "SDM_JADWAL", "SDM_ERP"], &[])?;
+        require_service(app, ctx, &["SUPERUSER_CONTROL", "LAPORAN_REGULASI"], &[])?;
     }
     let kind = text(body, "evidenceType").trim().to_uppercase();
     let allowed = ["SIP_NAKES", "SIP_STR_NAKES", "SIPA_APOTEKER", "IZIN_OPERASIONAL", "KALIBRASI_ALKES", "MOU_PIHAK_KETIGA", "IZIN_BAPETEN_RADIOLOGI"];
     let valid_until = text(body, "validUntil").trim();
-    if !allowed.contains(&kind.as_str()) || text(body, "documentNumber").trim().is_empty() || valid_until.is_empty() {
-        return Err(bad_request("Jenis bukti, nomor dokumen, dan masa berlaku wajib diisi."));
+    if !allowed.contains(&kind.as_str())
+        || text(body, "documentNumber").trim().is_empty()
+        || chrono::NaiveDate::parse_from_str(valid_until, "%Y-%m-%d").is_err()
+    {
+        return Err(bad_request("Jenis bukti, nomor dokumen, dan masa berlaku (YYYY-MM-DD) wajib diisi dengan benar."));
     }
-    let record = json!({"id":id("evd"),"facilityCode":ctx.facility_code,"evidenceType":kind,"documentNumber":text(body,"documentNumber").trim(),"referenceNumber":text(body,"documentNumber").trim(),"subjectName":text(body,"holderName").trim(),"holderOrVendorName":text(body,"holderName").trim(),"validUntil":valid_until,"verificationStatus":"VERIFIED_ACTIVE","verifiedBy":text(&ctx.user,"username"),"createdAt":now()});
+    let target_facility = if !ctx.facility_code.is_empty() {
+        ctx.facility_code.clone()
+    } else {
+        crate::domain::normalize_facility(text(body, "facilityCode"))
+    };
+    if target_facility.is_empty() {
+        return Err(bad_request("Pilih fasilitas aktif sebelum mendaftarkan bukti."));
+    }
+    let record = json!({"id":id("evd"),"facilityCode":target_facility,"evidenceType":kind,"documentNumber":text(body,"documentNumber").trim(),"referenceNumber":text(body,"documentNumber").trim(),"subjectName":text(body,"holderName").trim(),"holderOrVendorName":text(body,"holderName").trim(),"validUntil":valid_until,"verificationStatus":"VERIFIED_ACTIVE","verifiedBy":text(&ctx.user,"username"),"createdAt":now()});
     array_mut(&mut app.db, "evidenceRegistry").push(record.clone());
     audit(app, ctx, "EVIDENCE_REGISTERED", text(&record, "documentNumber"), &format!("Bukti {kind} dicatat."));
     save(app)?;
@@ -388,12 +406,35 @@ fn staff_record(app: &mut App, ctx: &RequestContext, body: &Value, collection: &
     if text(&ctx.user, "role") != "SUPERUSER" {
         require_service(app, ctx, &["SDM_ERP", "SDM_JADWAL"], &[])?;
     }
-    if text(body, "staffName").trim().is_empty() {
+    if ctx.facility_code.is_empty() {
+        return Err(bad_request("Pilih fasilitas aktif sebelum mencatat data SDM."));
+    }
+    let staff_name = text(body, "staffName").trim();
+    if staff_name.is_empty() {
         return Err(bad_request("Nama pegawai wajib diisi."));
     }
-    let record = json!({"id":id("sdm"),"facilityCode":ctx.facility_code,"staffName":text(body,"staffName").trim(),"kind":action,"note":text(body,"note").trim(),"amount":body["amount"].as_f64().filter(|amount| amount.is_finite()).unwrap_or(0.0).round(),"date":text(body,"date").trim(),"createdAt":now(),"createdBy":text(&ctx.user,"username")});
+    let amount = body["amount"]
+        .as_f64()
+        .filter(|amount| amount.is_finite() && *amount >= 0.0)
+        .unwrap_or(0.0)
+        .round();
+    let record = json!({"id":id("sdm"),"facilityCode":ctx.facility_code,"staffName":staff_name,"kind":action,"note":text(body,"note").trim(),"amount":amount,"date":text(body,"date").trim(),"status":if action == "CUTI" {"APPROVED"} else {"RECORDED"},"createdAt":now(),"createdBy":text(&ctx.user,"username")});
     array_mut(&mut app.db, collection).push(record.clone());
-    audit(app, ctx, action, text(&record, "id"), &format!("{action} {}.", text(&record, "staffName")));
+    if action == "PENGGAJIAN" && amount > 0.0 {
+        let entry = crate::finance::accounting_entry(
+            app,
+            ctx,
+            "5-2100",
+            "Beban Gaji & Remunerasi SDM",
+            "PENGELUARAN",
+            "GAJI_SDM",
+            &format!("Penggajian SDM — {staff_name}"),
+            amount,
+            text(&record, "id"),
+        );
+        crate::finance::record_books(app, ctx, &entry);
+    }
+    audit(app, ctx, action, text(&record, "id"), &format!("{action} {staff_name}."));
     save(app)?;
     json_response(201, record)
 }

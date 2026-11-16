@@ -168,7 +168,7 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
     let index = invoice_index(app, ctx, invoice_id)?;
     let mut invoice = array(&app.db, "invoices")[index].clone();
     if matches!(text(&invoice, "status"), "LUNAS" | "KLAIM_DIAJUKAN") {
-        return json_response(200, invoice);
+        return Err(conflict("Tagihan ini sudah diselesaikan atau diajukan klaim."));
     }
     if text(&invoice, "pricingStatus") != "COMPLETE" {
         return Err(conflict(
@@ -222,8 +222,9 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
     invoice["cashierName"] = ctx.user["fullName"].clone();
     let timestamp = now();
     if credit {
-        invoice["claimRequestedAmount"] =
-            json!((number(&invoice, "subtotal") - number(&invoice, "discountAmount")).max(0.0));
+        let net = (number(&invoice, "subtotal") - number(&invoice, "discountAmount")).max(0.0);
+        invoice["claimRequestedAmount"] = json!(net);
+        invoice["patientPayableAmount"] = json!(0.0);
         invoice["claimSubmittedAt"] = json!(timestamp);
         invoice["paidAt"] = Value::Null;
     } else {
@@ -233,7 +234,7 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
         invoice["totalReceivedAmount"] = invoice["patientPayableAmount"].clone();
     }
     let revenue = (number(&invoice, "subtotal") - number(&invoice, "discountAmount")).max(0.0);
-    if !credit {
+    if !credit && revenue > 0.0 {
         let entry = accounting_entry(
             app,
             ctx,
@@ -334,13 +335,14 @@ fn set_pricing(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Val
             ));
         }
     }
+    let existing_discount = number(&invoice, "discountAmount");
     invoice["items"] = json!(items);
     invoice["unpricedItems"] = json!([]);
     invoice["pricingStatus"] = json!("COMPLETE");
     invoice["pricingSource"] = json!("MANUAL");
     invoice["pricedAt"] = json!(now());
     invoice["pricedBy"] = ctx.user["id"].clone();
-    recalculate(&mut invoice, 0.0);
+    recalculate(&mut invoice, existing_discount);
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     audit(
         app,
@@ -385,6 +387,22 @@ fn add_item(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value)
     } else {
         text(body, "category")
     };
+    if ![
+        "PENDAFTARAN",
+        "KONSULTASI",
+        "TINDAKAN",
+        "FARMASI",
+        "LABORATORIUM",
+        "RADIOLOGI",
+        "KAMAR_INAP",
+        "BEDAH_IBS",
+        "MCU",
+    ]
+    .contains(&category)
+        || !(quantity * price).is_finite()
+    {
+        return Err(bad_request("Kategori atau nominal biaya tidak valid."));
+    }
     array_mut(&mut invoice,"items").push(json!({"id":id("item"),"category":category,"description":text(body,"description").trim(),"quantity":quantity,"unitPrice":price,"subtotal":quantity*price}));
     let discount = number(&invoice, "discountAmount");
     recalculate(&mut invoice, discount);
@@ -514,7 +532,8 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     }
     let timestamp = now();
     let net = (number(&invoice, "subtotal") - number(&invoice, "discountAmount")).max(0.0);
-    let settled = received >= net;
+    let partial = body["partial"].as_bool() == Some(true);
+    let settled = !partial || received >= net;
     invoice["status"] = json!(if settled { "LUNAS" } else { "KLAIM_DIAJUKAN" });
     invoice["paidAt"] = if settled {
         json!(timestamp)
@@ -522,6 +541,8 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         Value::Null
     };
     invoice["totalReceivedAmount"] = json!(received);
+    invoice["inacbgOrIdrgTariffAmount"] = json!(received);
+    invoice["tariffVarianceAmount"] = json!(received - net);
     if bpjs {
         invoice["bpjsCoveredAmount"] = json!(received);
     }

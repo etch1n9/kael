@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fs::{self, OpenOptions},
     hash::{Hash, Hasher},
     path::Path,
@@ -179,7 +179,7 @@ fn read_database(connection: &Connection, path: &Path) -> Result<(Value, HashMap
     let mut db = json!({});
     let mut fingerprints = HashMap::new();
     let mut statement = connection
-        .prepare("SELECT collection, id, payload FROM records")
+        .prepare("SELECT collection, id, payload FROM records ORDER BY rowid ASC")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
@@ -221,40 +221,28 @@ fn write_database(
             continue;
         }
         if let Some(rows) = value.as_array() {
-            let mut seen = Vec::new();
+            let mut seen = HashSet::with_capacity(rows.len());
             for row in rows {
                 let id = record_id(row);
-                if id.is_empty() || seen.iter().any(|existing: &String| existing == &id) {
+                if id.is_empty() || !seen.insert(id.clone()) {
                     continue;
                 }
                 let payload = serde_json::to_string(row).map_err(|error| error.to_string())?;
                 let digest = hash_payload(&payload);
                 let mark = fingerprint_key(key, &id);
                 if previous.get(&mark) != Some(&digest) {
+                    let fac = if !text_of(row, "facilityCode").is_empty() {
+                        text_of(row, "facilityCode")
+                    } else {
+                        text_of(row, "originFacilityCode")
+                    };
                     transaction.execute(
                         "INSERT INTO records (collection, id, facility_code, created_at, payload) VALUES (?1, ?2, ?3, ?4, ?5)
                          ON CONFLICT(collection, id) DO UPDATE SET facility_code = excluded.facility_code, created_at = excluded.created_at, payload = excluded.payload",
-                        params![key, id, text_of(row, "facilityCode"), created_of(row), payload],
+                        params![key, id, fac, created_of(row), payload],
                     ).map_err(|error| error.to_string())?;
                 }
                 next.insert(mark, digest);
-                seen.push(id);
-            }
-            let mut statement = transaction
-                .prepare("SELECT id FROM records WHERE collection = ?1")
-                .map_err(|error| error.to_string())?;
-            let existing: Vec<String> = statement
-                .query_map(params![key], |row| row.get(0))
-                .map_err(|error| error.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| error.to_string())?;
-            drop(statement);
-            for id in existing {
-                if !seen.iter().any(|item| item == &id) {
-                    transaction
-                        .execute("DELETE FROM records WHERE collection = ?1 AND id = ?2", params![key, id])
-                        .map_err(|error| error.to_string())?;
-                }
             }
         } else if !value.is_null() {
             let payload = serde_json::to_string(value).map_err(|error| error.to_string())?;
@@ -269,11 +257,30 @@ fn write_database(
             next.insert(mark, digest);
         }
     }
+    for old_mark in previous.keys() {
+        if !next.contains_key(old_mark) {
+            if let Some((collection, id)) = old_mark.split_once('\u{1}') {
+                if collection != "@" {
+                    transaction
+                        .execute("DELETE FROM records WHERE collection = ?1 AND id = ?2", params![collection, id])
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+    }
     Ok(next)
 }
 
 fn record_id(row: &Value) -> String {
-    for key in ["id", "code", "entryNumber", "invoiceNumber", "journalNumber"] {
+    for key in [
+        "id",
+        "configId",
+        "scopeKey",
+        "code",
+        "entryNumber",
+        "invoiceNumber",
+        "journalNumber",
+    ] {
         let value = text_of(row, key);
         if !value.is_empty() {
             return value;
@@ -286,8 +293,17 @@ fn text_of(value: &Value, key: &str) -> String {
     value.get(key).and_then(Value::as_str).unwrap_or("").to_owned()
 }
 
-fn created_of(value: &Value) -> String {
-    for key in ["createdAt", "timestamp", "updatedAt"] {
+pub fn created_of(value: &Value) -> String {
+    for key in [
+        "createdAt",
+        "timestamp",
+        "recordedAt",
+        "publishedAt",
+        "admittedAt",
+        "orderDate",
+        "scheduledStart",
+        "updatedAt",
+    ] {
         let found = text_of(value, key);
         if !found.is_empty() {
             return found;

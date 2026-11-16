@@ -107,10 +107,12 @@ fn patient_data(app: &App, ctx: &RequestContext, body: &Value) -> Result<Value, 
     let nik = text(body, "nik").trim();
     let name = text(body, "fullName").trim();
     let birthday = text(body, "birthDate");
+    let today = &now()[..10];
     if name.is_empty()
         || nik.len() != 16
         || !nik.bytes().all(|c| c.is_ascii_digit())
         || chrono::NaiveDate::parse_from_str(birthday, "%Y-%m-%d").is_err()
+        || birthday > today
     {
         return Err(bad_request(
             "Nama Lengkap, NIK (16 digit), dan Tanggal Lahir wajib diisi dengan benar.",
@@ -173,7 +175,8 @@ fn update_fields(
         return Err(bad_request("Pilih jenis kelamin pasien yang sesuai."));
     }
     if body.get("birthDate").is_some()
-        && chrono::NaiveDate::parse_from_str(text(body, "birthDate"), "%Y-%m-%d").is_err()
+        && (chrono::NaiveDate::parse_from_str(text(body, "birthDate"), "%Y-%m-%d").is_err()
+            || text(body, "birthDate") > &now()[..10])
     {
         return Err(bad_request("Tanggal lahir pasien tidak valid."));
     }
@@ -305,6 +308,28 @@ fn vitals(body: &Value) -> Result<Value, ApiError> {
     {
         return Err(bad_request("Skor GCS dan skala nyeri tidak valid."));
     }
+    let sys = n(value, "systolic");
+    let dia = n(value, "diastolic");
+    let hr = n(value, "heartRate");
+    let rr = n(value, "respiratoryRate");
+    let temp = n(value, "temperature");
+    let spo2 = n(value, "spo2");
+    let weight = n(value, "weightKg");
+    let height = n(value, "heightCm");
+    if !(30.0..=350.0).contains(&sys)
+        || !(15.0..=250.0).contains(&dia)
+        || sys <= dia
+        || !(15.0..=300.0).contains(&hr)
+        || !(4.0..=100.0).contains(&rr)
+        || !(25.0..=45.0).contains(&temp)
+        || !(30.0..=100.0).contains(&spo2)
+        || !(0.3..=500.0).contains(&weight)
+        || !(20.0..=300.0).contains(&height)
+    {
+        return Err(bad_request(
+            "Nilai tanda vital berada di luar rentang fisiologis yang valid.",
+        ));
+    }
     Ok(value.clone())
 }
 
@@ -396,13 +421,6 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
     };
     let timestamp = now();
     let day = &timestamp[..10];
-    let sequence = array(&app.db, "visits")
-        .iter()
-        .filter(|visit| {
-            text(visit, "facilityCode") == ctx.facility_code && text(visit, "createdAt").starts_with(day)
-        })
-        .count()
-        + 1;
     let config = facility_snapshot(app, ctx);
     let poli = text(body, "polyclinic");
     let unit = array(&config, "units")
@@ -418,6 +436,43 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
                 "Unit tujuan belum dibuat superuser, nonaktif, atau bukan tujuan kunjungan.",
             )
         })?;
+    if let Some(doc) = &doctor {
+        let assigned = array(doc, "polyclinics");
+        let single = text(doc, "polyclinic").trim();
+        let has_assigned = !assigned.is_empty() || !single.is_empty();
+        let matches = assigned.iter().any(|u| u.as_str() == Some(poli)) || single == poli;
+        if has_assigned && !matches {
+            return Err(bad_request(
+                "Dokter yang dipilih tidak bertugas pada unit/poliklinik tujuan ini.",
+            ));
+        }
+    }
+    if array(&app.db, "visits").iter().any(|v| {
+        text(v, "facilityCode") == ctx.facility_code
+            && text(v, "patientId") == text(&patient, "id")
+            && text(v, "polyclinic") == poli
+            && !["SELESAI", "BATAL"].contains(&text(v, "status"))
+    }) {
+        return Err(conflict(
+            "Pasien masih memiliki antrean kunjungan aktif di unit tujuan ini.",
+        ));
+    }
+    let sequence = array(&app.db, "visits")
+        .iter()
+        .filter(|visit| {
+            text(visit, "facilityCode") == ctx.facility_code && text(visit, "createdAt").starts_with(day)
+        })
+        .count()
+        + 1;
+    let poli_sequence = array(&app.db, "visits")
+        .iter()
+        .filter(|visit| {
+            text(visit, "facilityCode") == ctx.facility_code
+                && text(visit, "polyclinic") == poli
+                && text(visit, "createdAt").starts_with(day)
+        })
+        .count()
+        + 1;
     let poli_prefix: String = poli
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
@@ -444,7 +499,7 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
         return Err(bad_request("Jenis penjamin tidak valid."));
     }
     let doctor = doctor.unwrap_or(Value::Null);
-    let visit = json!({"id":id("vis"),"facilityCode":ctx.facility_code,"queueNumber":format!("{poli_prefix}-{sequence:03}"),"registrationNumber":registration,"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"nik":patient["nik"],"gender":patient["gender"],"birthDate":patient["birthDate"],"polyclinic":poli,"doctorId":text(&doctor,"id"),"doctorName":text(&doctor,"fullName"),"guarantor":guarantor,"guarantorSettlement":settlement,"bpjsSepOrPcareNo":if settlement=="BPJS"{body["bpjsSepOrPcareNo"].clone()}else{Value::Null},"triageLevel":auto_triage(&vital_signs),"status":"MENUNGGU","vitals":vital_signs,"chiefComplaint":text(body,"chiefComplaint").trim(),"createdAt":timestamp,"updatedAt":timestamp});
+    let visit = json!({"id":id("vis"),"facilityCode":ctx.facility_code,"queueNumber":format!("{poli_prefix}-{poli_sequence:03}"),"registrationNumber":registration,"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"nik":patient["nik"],"gender":patient["gender"],"birthDate":patient["birthDate"],"polyclinic":poli,"doctorId":text(&doctor,"id"),"doctorName":text(&doctor,"fullName"),"guarantor":guarantor,"guarantorSettlement":settlement,"bpjsSepOrPcareNo":if settlement=="BPJS"{body["bpjsSepOrPcareNo"].clone()}else{Value::Null},"triageLevel":auto_triage(&vital_signs),"status":"MENUNGGU","vitals":vital_signs,"chiefComplaint":text(body,"chiefComplaint").trim(),"createdAt":timestamp,"updatedAt":timestamp});
     array_mut(&mut app.db, "visits").push(visit.clone());
     if settlement == "BPJS" {
         let emergency = text(&unit, "unitType") == "IGD";
@@ -503,6 +558,42 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
         return Err(bad_request("Status kunjungan tidak valid."));
     }
     let mut visit = array(&app.db, "visits")[i].clone();
+    let current_status = text(&visit, "status").to_owned();
+    if ["SELESAI", "BATAL"].contains(&current_status.as_str()) && status != current_status {
+        return Err(conflict(
+            "Kunjungan yang telah selesai atau dibatalkan tidak dapat diubah kembali.",
+        ));
+    }
+    if status == "BATAL" {
+        let has_settled_inv = array(&app.db, "invoices").iter().any(|inv| {
+            text(inv, "facilityCode") == ctx.facility_code
+                && text(inv, "visitId") == visit_id
+                && text(inv, "status") != "BELUM_LUNAS"
+        });
+        let has_dispensed_rx = array(&app.db, "pharmacyOrders").iter().any(|rx| {
+            text(rx, "facilityCode") == ctx.facility_code
+                && text(rx, "visitId") == visit_id
+                && text(rx, "status") == "DISERAHKAN"
+        });
+        if has_settled_inv || has_dispensed_rx {
+            return Err(conflict(
+                "Kunjungan tidak dapat dibatalkan karena obat telah diserahkan atau tagihan telah diselesaikan.",
+            ));
+        }
+        array_mut(&mut app.db, "pharmacyOrders").retain(|rx| {
+            !(text(rx, "facilityCode") == ctx.facility_code && text(rx, "visitId") == visit_id)
+        });
+        array_mut(&mut app.db, "labOrders").retain(|lab| {
+            !(text(lab, "facilityCode") == ctx.facility_code
+                && text(lab, "visitId") == visit_id
+                && text(lab, "status") != "SELESAI_VERIFIKASI")
+        });
+        array_mut(&mut app.db, "invoices").retain(|inv| {
+            !(text(inv, "facilityCode") == ctx.facility_code
+                && text(inv, "visitId") == visit_id
+                && text(inv, "status") == "BELUM_LUNAS")
+        });
+    }
     visit["status"] = json!(status);
     visit["updatedAt"] = json!(now());
     array_mut(&mut app.db, "visits")[i] = visit.clone();
@@ -568,6 +659,9 @@ fn clear_bed(bed: &mut Value) {
         "admittedAt",
         "attendingDoctor",
         "diagnosis",
+        "guarantor",
+        "guarantorSettlement",
+        "visitId",
     ] {
         if let Some(object) = bed.as_object_mut() {
             object.remove(key);
@@ -617,6 +711,32 @@ fn bed_action(
             }) {
                 return Err(conflict("Pasien sudah menempati tempat tidur lain."));
             }
+            let latest_visit = array(&app.db, "visits").iter().rev().find(|v| {
+                text(v, "facilityCode") == ctx.facility_code
+                    && text(v, "patientId") == text(&patient, "id")
+                    && text(v, "status") != "BATAL"
+            });
+            let guarantor = if !text(body, "guarantor").trim().is_empty() {
+                text(body, "guarantor").trim().to_owned()
+            } else {
+                latest_visit
+                    .map(|v| text(v, "guarantor").to_owned())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "UMUM".to_owned())
+            };
+            let settlement = if !text(body, "guarantorSettlement").trim().is_empty() {
+                text(body, "guarantorSettlement").trim().to_owned()
+            } else if let Some(v) = latest_visit {
+                if visit_uses_bpjs(v) {
+                    "BPJS".to_owned()
+                } else {
+                    "PATIENT".to_owned()
+                }
+            } else if guarantor.starts_with("BPJS") {
+                "BPJS".to_owned()
+            } else {
+                "PATIENT".to_owned()
+            };
             bed["status"] = json!("TERISI");
             bed["patientId"] = patient["id"].clone();
             bed["patientName"] = patient["fullName"].clone();
@@ -624,19 +744,30 @@ fn bed_action(
             bed["admittedAt"] = json!(now());
             bed["attendingDoctor"] = practitioner["fullName"].clone();
             bed["diagnosis"] = json!(text(body, "diagnosis"));
+            bed["guarantor"] = json!(guarantor);
+            bed["guarantorSettlement"] = json!(settlement);
+            if let Some(v) = latest_visit {
+                bed["visitId"] = v["id"].clone();
+            }
         }
         "discharge" => {
+            if text(&bed, "status") != "TERISI" {
+                return Err(conflict("Tempat tidur sedang tidak terisi pasien aktif."));
+            }
             let admitted = text(&bed, "admittedAt").to_owned();
             let days = stay_days(&admitted).max(1);
+            let guarantor = default(&bed, "guarantor", "UMUM").to_owned();
+            let settlement = default(&bed, "guarantorSettlement", "PATIENT").to_owned();
+            let visit_id = text(&bed, "visitId").to_owned();
             crate::finance::append_service_charge(
                 app,
                 ctx,
-                "",
+                &visit_id,
                 text(&bed, "patientId"),
                 text(&bed, "patientName"),
                 text(&bed, "mrNumber"),
-                "UMUM",
-                "PATIENT",
+                &guarantor,
+                &settlement,
                 "KAMAR_INAP",
                 &format!("Kamar {} / {} ({} hari)", text(&bed, "roomNumber"), text(&bed, "bedClass"), days),
                 days as f64,
@@ -650,6 +781,16 @@ fn bed_action(
             if !status.is_empty() {
                 if !["TERSEDIA", "TERISI", "DIBERSIHKAN", "MAINTENANCE"].contains(&status) {
                     return Err(bad_request("Status tempat tidur tidak valid."));
+                }
+                if text(&bed, "status") == "TERISI" && status != "TERISI" {
+                    return Err(conflict(
+                        "Gunakan alur pemulangan pasien (discharge) sebelum mengubah status tempat tidur yang sedang terisi.",
+                    ));
+                }
+                if text(&bed, "status") != "TERISI" && status == "TERISI" {
+                    return Err(bad_request(
+                        "Gunakan alur admisi (assign) untuk menempatkan pasien ke tempat tidur.",
+                    ));
                 }
                 if status != "TERISI" {
                     bed["status"] = json!(status);
@@ -668,8 +809,17 @@ fn bed_action(
                     }).cloned().ok_or_else(|| bad_request("Pilih penanggung jawab klinis aktif yang terdaftar di fasilitas ini."))?;
                     bed["attendingDoctor"] = practitioner["fullName"].clone();
                 }
-                if let Some(value) = body.get("diagnosis") {
-                    bed["diagnosis"] = value.clone();
+                if let Some(value) = body.get("diagnosis").and_then(Value::as_str) {
+                    let note = value.trim();
+                    bed["diagnosis"] = json!(note);
+                    if !note.is_empty() {
+                        array_mut(&mut bed, "cpptEntries").push(json!({
+                            "id": id("cppt"),
+                            "recordedAt": now(),
+                            "authorName": ctx.user["fullName"],
+                            "note": note,
+                        }));
+                    }
                 }
             }
         }
@@ -751,14 +901,35 @@ fn create_lab(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if codes.is_empty() {
         return Err(bad_request("Pilih parameter pemeriksaan laboratorium."));
     }
+    let parsed_params = parameters(codes, &body["tariffs"])?;
     let mut order = lab_record(
         ctx,
         &visit,
-        parameters(codes, &body["tariffs"])?,
+        parsed_params.clone(),
         default(body, "clinicalNotes", text(&visit, "chiefComplaint")),
         "PERMINTAAN_BARU",
     );
-    order["billingStatus"] = json!("NOT_BILLED");
+    let mut billed_any = false;
+    for param in &parsed_params {
+        if let Some(tariff) = param["tariff"].as_f64().filter(|t| t.is_finite() && *t > 0.0) {
+            crate::finance::append_service_charge(
+                app,
+                ctx,
+                text(&visit, "id"),
+                text(&visit, "patientId"),
+                text(&visit, "patientName"),
+                text(&visit, "mrNumber"),
+                text(&visit, "guarantor"),
+                text(&visit, "guarantorSettlement"),
+                "LABORATORIUM",
+                &format!("Pemeriksaan Lab: {}", text(param, "name")),
+                1.0,
+                tariff,
+            );
+            billed_any = true;
+        }
+    }
+    order["billingStatus"] = json!(if billed_any { "BILLED" } else { "NOT_BILLED" });
     array_mut(&mut app.db, "labOrders").push(order.clone());
     audit(
         app,
@@ -906,6 +1077,11 @@ fn verify_lab(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value)
 
 fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     require_service(app, ctx, &["RME_DOKTER"], &["SUB_OUTPATIENT_SOAP_CPPT"])?;
+    if text(&ctx.user, "role") != "SUPERUSER" && !is_practitioner(app, &ctx.user, &ctx.facility_code) {
+        return Err(forbidden(
+            "Hanya tenaga medis pemeriksa aktif (praktisi) yang dapat mengesahkan RME SOAP.",
+        ));
+    }
     let vi = index(
         app,
         ctx,
@@ -1006,12 +1182,22 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     } else {
         array_mut(&mut app.db, "soapRecords").push(record.clone());
     }
-    if text(&record, "recordStatus") == "ADDENDUM_APPENDED"
+    let plan_unchanged = existing
+        .as_ref()
+        .is_some_and(|old| old["plan"] == record["plan"]);
+    if (matches!(
+        text(&record, "recordStatus"),
+        "ADDENDUM_APPENDED" | "AMENDED_WITHIN_48H"
+    ) && plan_unchanged)
         || prior_invoice
             .as_ref()
             .map(|invoice| text(invoice, "status") != "BELUM_LUNAS")
             .unwrap_or(false)
     {
+        visit["vitals"] = vital_signs.clone();
+        visit["triageLevel"] = json!(auto_triage(&vital_signs));
+        visit["updatedAt"] = json!(timestamp);
+        array_mut(&mut app.db, "visits")[vi] = visit.clone();
         audit(
             app,
             ctx,
@@ -1032,7 +1218,19 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     visit["vitals"] = vital_signs.clone();
     visit["soapId"] = record["id"].clone();
     visit["triageLevel"] = json!(auto_triage(&vital_signs));
-    visit["status"] = json!(if !prescriptions.is_empty() || !lab_params.is_empty() {
+    let rx_done = prescriptions.is_empty()
+        || array(&app.db, "pharmacyOrders").iter().any(|order| {
+            text(order, "visitId") == text(&visit, "id")
+                && text(order, "facilityCode") == ctx.facility_code
+                && text(order, "status") == "DISERAHKAN"
+        });
+    let lab_done = lab_params.is_empty()
+        || array(&app.db, "labOrders").iter().any(|order| {
+            text(order, "visitId") == text(&visit, "id")
+                && text(order, "facilityCode") == ctx.facility_code
+                && text(order, "status") == "SELESAI_VERIFIKASI"
+        });
+    visit["status"] = json!(if !rx_done || !lab_done {
         "FARMASI_LAB"
     } else {
         "KASIR"
@@ -1163,6 +1361,16 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             1.0,
             &parameter["tariff"],
         )?;
+    }
+    if let Some(prev) = &prior_invoice {
+        for prev_item in array(prev, "items") {
+            let cat = text(prev_item, "category");
+            if ["RADIOLOGI", "KAMAR_INAP", "BEDAH_IBS", "MCU"].contains(&cat)
+                || text(prev_item, "id").starts_with("item-")
+            {
+                items.push(prev_item.clone());
+            }
+        }
     }
     let bpjs = visit_uses_bpjs(&visit);
     let totals = invoice_totals(&items, bpjs, 0.0);

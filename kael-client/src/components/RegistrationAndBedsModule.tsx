@@ -523,6 +523,9 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
         diagnosis: assignDiagnosis,
       });
       setAssignBedId(null);
+      setAssignPatientId('');
+      setAssignDoctorName('');
+      setAssignDiagnosis('');
       await onRefreshWorkspace();
       setFeedbackMessage(
         `Tempat tidur ${updated.bedCode} kini ditempati oleh ${updated.patientName}.`
@@ -590,6 +593,10 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
         dailyRate: Number(newBedRate),
       });
       setNewBedCode('');
+      setNewBedRoom('');
+      setNewBedWard('');
+      setNewBedClass('');
+      setNewBedRate('');
       setShowAddBedForm(false);
       await onRefreshWorkspace();
       setFeedbackMessage(`Kamar/Bed baru ${created.bedCode} berhasil ditambahkan.`);
@@ -686,7 +693,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
             className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-colors flex items-center gap-2 cursor-pointer whitespace-normal text-left max-w-full shrink-0 ${
               subTab === 'QUEUE_REG'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#11302A]'
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
@@ -700,7 +707,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
             className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-colors flex items-center gap-2 cursor-pointer whitespace-normal text-left max-w-full shrink-0 ${
               subTab === 'MPI'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#11302A]'
             }`}
           >
             <UserPlus className="w-3.5 h-3.5" />
@@ -714,7 +721,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
             className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-colors flex items-center gap-2 cursor-pointer whitespace-normal text-left max-w-full shrink-0 ${
               subTab === 'SCHEDULE'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#11302A]'
             }`}
           >
             <CalendarClock className="w-3.5 h-3.5" />
@@ -728,7 +735,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
             className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-colors flex items-center gap-2 cursor-pointer whitespace-normal text-left max-w-full shrink-0 ${
               subTab === 'BEDS'
                 ? 'bg-[#00897B] text-white'
-                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1]'
+                : 'bg-[#F3F8F6] dark:bg-[#081916] text-[#0F2922] dark:text-white border border-[#D5E3DF] dark:border-[#1E473F] hover:bg-[#EBF4F1] dark:hover:bg-[#11302A]'
             }`}
           >
             <Bed className="w-3.5 h-3.5" />
@@ -1498,8 +1505,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                         </td>
                       </tr>
                     ) : (
-                      <>
-                      {visitPage.bar}{visitPage.rows.map((v) => (
+                      visitPage.rows.map((v) => (
                         <tr
                           key={v.id}
                           className="hover:bg-emerald-50/40 dark:hover:bg-slate-800/40 transition-colors"
@@ -1587,12 +1593,12 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                             </div>
                           </td>
                         </tr>
-                      ))}
-                      </>
+                      ))
                     )}
                   </tbody>
                 </table>
               </div>
+              {visitPage.bar}
             </div>
           </div>
         </div>
@@ -1931,7 +1937,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                  {patientPage.bar}{patientPage.rows.map((p) => (
+                  {patientPage.rows.map((p) => (
                     <tr
                       key={p.id}
                       className="hover:bg-emerald-50/30 dark:hover:bg-slate-800/40 transition-colors"
@@ -1999,6 +2005,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                 </tbody>
               </table>
             </div>
+            {patientPage.bar}
           </div>
         </div>
       )}
@@ -2302,7 +2309,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
           )}
 
           <div className="grid min-w-0 [&>*]:min-w-0 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {bedPage.bar}{bedPage.rows.map((bed) => (
+            {bedPage.rows.map((bed) => (
               <div
                 key={bed.id}
                 className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between"
@@ -2401,6 +2408,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
               </div>
             ))}
           </div>
+          {bedPage.bar}
         </div>
       )}
     </div>

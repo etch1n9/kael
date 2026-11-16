@@ -1,6 +1,7 @@
 import {
   AccountingEntry,
   AuditLogEntry,
+  BillingLineItem,
   BridgingLog,
   DoubleEntryJournal,
   EvidenceRegistryItem,
@@ -515,6 +516,8 @@ export const kaelApi = {
         value: number;
         refMin?: number | null;
         refMax?: number | null;
+        criticalMin?: number | null;
+        criticalMax?: number | null;
         referenceVerified?: boolean;
         referenceSource?: string;
         methodPopulation?: string;
@@ -565,7 +568,7 @@ export const kaelApi = {
     facilityCode: string,
     invoiceId: string,
     payload: {
-      category: 'PENDAFTARAN' | 'KONSULTASI' | 'TINDAKAN' | 'FARMASI' | 'LABORATORIUM' | 'KAMAR_INAP';
+      category: BillingLineItem['category'];
       description: string;
       quantity: number;
       unitPrice: number;
@@ -604,7 +607,7 @@ export const kaelApi = {
       facilityCode
     ),
 
-  reconcileFinanceClaim: (token: string, facilityCode: string, invoiceId: string, payload: { receivedAmount: number; paymentReference: string }) =>
+  reconcileFinanceClaim: (token: string, facilityCode: string, invoiceId: string, payload: { receivedAmount: number; paymentReference: string; partial?: boolean; inacbgOrIdrgTariffAmount?: number }) =>
     requestJson<{ invoice: InvoiceRecord; entry: AccountingEntry }>(
       '/finance/reconcile-claim',
       {
@@ -740,10 +743,10 @@ export const kaelApi = {
       facilityCode
     ),
 
-  registerEvidence: (token: string, facilityCode: string, payload: { evidenceType: string; documentNumber: string; holderName: string; validUntil: string }) =>
+  registerEvidence: (token: string, facilityCode: string, payload: { evidenceType: string; documentNumber: string; holderName: string; validUntil: string; facilityCode?: string; issuer?: string }) =>
     requestJson<Record<string, unknown>>('/evidence', { method: 'POST', body: JSON.stringify(payload) }, token, facilityCode),
 
-  scheduleSurgery: (token: string, facilityCode: string, payload: { procedureName: string; scheduledStart: string; patientName: string; mrNumber: string; operatingRoomCode: string; surgeonName: string; icd9CmCode?: string }) =>
+  scheduleSurgery: (token: string, facilityCode: string, payload: { procedureName: string; scheduledStart: string; patientId?: string; visitId?: string; patientName: string; mrNumber: string; operatingRoomCode: string; surgeonName: string; anesthesiologistName?: string; icd9CmCode?: string; estimatedTariff?: number }) =>
     requestJson<Record<string, unknown>>('/surgical-schedules', { method: 'POST', body: JSON.stringify(payload) }, token, facilityCode),
 
   recordStaff: (

@@ -69,14 +69,14 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
     RESEP_FEFO: 'APOTEK', STOCK_OPNAME: 'KATALOG_OPNAME', MUTASI_KELUAR_MASUK: 'MUTASI_STOK',
     PENGADAAN_PBF: 'PENGADAAN_PBF', LABORATORIUM: 'LABORATORIUM', RADIOLOGI_RIS: 'RADIOLOGI_RIS', PENUNJANG_RS: 'PENUNJANG_RS',
   };
-  const allowedTabs: PharmacySubTab[] = (initialView === 'KATALOG_OPNAME' || initialView === 'MUTASI_STOK'
-    ? ['STOCK_OPNAME', 'MUTASI_KELUAR_MASUK'] as PharmacySubTab[]
-    : [Object.keys(tabModule).find((tab) => tabModule[tab as PharmacySubTab] === initialView) || 'RESEP_FEFO'] as PharmacySubTab[])
-    .filter((tab) => hasModule(tabModule[tab]));
+  const isInventoryContext = ['APOTEK', 'KATALOG_OPNAME', 'MUTASI_STOK', 'PENGADAAN_PBF'].includes(initialView);
+  const allowedTabs: PharmacySubTab[] = (isInventoryContext
+    ? (['RESEP_FEFO', 'STOCK_OPNAME', 'MUTASI_KELUAR_MASUK', 'PENGADAAN_PBF'] as PharmacySubTab[])
+    : (['LABORATORIUM', 'RADIOLOGI_RIS', 'PENUNJANG_RS'] as PharmacySubTab[])
+  ).filter((tab) => hasModule(tabModule[tab]));
   useEffect(() => {
     if (!allowedTabs.includes(activeTab) && allowedTabs[0]) setActiveTab(allowedTabs[0]);
   }, [initialView, activeTab, grantedModules.join(',')]);
-  const isInventoryContext = ['APOTEK', 'KATALOG_OPNAME', 'MUTASI_STOK', 'PENGADAAN_PBF'].includes(initialView);
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
@@ -123,6 +123,8 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
   const [newMedBuyPrice, setNewMedBuyPrice] = useState<number | ''>('');
   const [newMedSellPrice, setNewMedSellPrice] = useState<number | ''>('');
   const [newMedStock, setNewMedStock] = useState<number>(0);
+  const [newMedBatch, setNewMedBatch] = useState('');
+  const [newMedExpiry, setNewMedExpiry] = useState('');
 
   // 6. Laboratory State
   const [selectedLabOrder, setSelectedLabOrder] = useState<LabOrder | null>(
@@ -329,12 +331,50 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
       );
     });
   }, [mutations, mutationTypeFilter, mutationMedFilter, searchQuery]);
-  const orderPage = usePage(workspace.pharmacyOrders);
+  const filteredPharmacyOrders = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return workspace.pharmacyOrders;
+    return workspace.pharmacyOrders.filter(
+      (o) =>
+        o.patientName.toLowerCase().includes(q) ||
+        o.mrNumber.toLowerCase().includes(q) ||
+        o.doctorName.toLowerCase().includes(q) ||
+        o.id.toLowerCase().includes(q) ||
+        o.items.some((i) => i.medicationName.toLowerCase().includes(q) || i.medicationCode.toLowerCase().includes(q))
+    );
+  }, [workspace.pharmacyOrders, searchQuery]);
+
+  const filteredLabOrders = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return workspace.labOrders;
+    return workspace.labOrders.filter(
+      (l) =>
+        l.patientName.toLowerCase().includes(q) ||
+        l.mrNumber.toLowerCase().includes(q) ||
+        l.specimenCode.toLowerCase().includes(q) ||
+        l.doctorName.toLowerCase().includes(q)
+    );
+  }, [workspace.labOrders, searchQuery]);
+
+  const orderPage = usePage(filteredPharmacyOrders);
   const opnamePage = usePage(stockOpnameRows);
   const mutationPage = usePage(filteredMutations);
-  const labPage = usePage(workspace.labOrders);
+  const labPage = usePage(filteredLabOrders);
   const purchasePage = usePage(workspace.purchaseOrders || []);
   const radiologyPage = usePage(workspace.radiologyOrders || []);
+
+  useEffect(() => {
+    if (!selectedLabOrder) {
+      if (workspace.labOrders[0]) selectLabForEdit(workspace.labOrders[0]);
+      return;
+    }
+    const updated = workspace.labOrders.find((l) => l.id === selectedLabOrder.id);
+    if (updated && updated !== selectedLabOrder) {
+      setSelectedLabOrder(updated);
+    } else if (!updated) {
+      setSelectedLabOrder(workspace.labOrders[0] || null);
+    }
+  }, [workspace.labOrders]);
 
   const selectLabForEdit = (order: LabOrder) => {
     setSelectedLabOrder(order);
@@ -387,6 +427,10 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         quantity: Number(restockQty),
         supplierName,
       });
+      setBatchNumber('');
+      setExpiryDate('');
+      setRestockQty(1);
+      setSupplierName('');
       await onRefreshWorkspace();
       setFeedback({
         type: 'success',
@@ -416,6 +460,9 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         patientOrUnitName: outPatientOrUnit,
         notes: outNotes,
       });
+      setOutQty(1);
+      setOutPatientOrUnit('');
+      setOutNotes('');
       await onRefreshWorkspace();
       setFeedback({
         type: 'success',
@@ -496,22 +543,32 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
   const handleCreateMasterMed = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMedCode.trim() || !newMedName.trim() || !newMedUnit.trim() || !newMedCategory || !newMedForm || newMedBuyPrice === '' || newMedSellPrice === '' || !Number.isFinite(newMedBuyPrice) || !Number.isFinite(newMedSellPrice) || newMedBuyPrice < 0 || newMedSellPrice < 0) { setFeedback({ type: 'error', text: 'Isi kode, nama, satuan, harga beli, dan harga jual obat secara eksplisit.' }); return; }
+    if (Number(newMedStock) > 0 && (!newMedBatch.trim() || !newMedExpiry)) {
+      setFeedback({ type: 'error', text: 'Isi nomor batch dan tanggal kedaluwarsa untuk stok awal (> 0).' });
+      return;
+    }
     setFeedback(null);
     try {
       const created = await kaelApi.createMedication(token, facilityCode, {
         code: newMedCode,
         name: newMedName,
-        genericName: newMedGeneric.trim(),
+        genericName: newMedGeneric.trim() || newMedName.trim(),
         unit: newMedUnit,
         category: newMedCategory,
         form: newMedForm,
         buyPrice: Number(newMedBuyPrice),
         sellPrice: Number(newMedSellPrice),
         initialStock: Number(newMedStock),
+        ...(Number(newMedStock) > 0 ? { initialBatchNumber: newMedBatch.trim(), initialExpiryDate: newMedExpiry } : {}),
       });
       setNewMedCode('');
       setNewMedName('');
       setNewMedGeneric('');
+      setNewMedBuyPrice('');
+      setNewMedSellPrice('');
+      setNewMedStock(0);
+      setNewMedBatch('');
+      setNewMedExpiry('');
       setShowAddMasterModal(false);
       await onRefreshWorkspace();
       setFeedback({
@@ -536,6 +593,9 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         panelCodes: newLabPanels,
         clinicalNotes: newLabNotes,
       });
+      setNewLabVisitId('');
+      setNewLabPanels([]);
+      setNewLabNotes('');
       setShowNewLabForm(false);
       await onRefreshWorkspace();
       setSelectedLabOrder(created);
@@ -566,7 +626,9 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         const reference = labReferences[parameter.code];
         if (reference?.verified && (reference.min === '' || reference.max === '' || !Number.isFinite(reference.min) || !Number.isFinite(reference.max) || reference.min > reference.max || !reference.source.trim())) throw new Error(`Lengkapi rentang dan sumber referensi ${parameter.code}, atau hapus konfirmasi referensi.`);
         return {
-          code: parameter.code, value: labValues[parameter.code] ?? parameter.value,
+          code: parameter.code, value: Number(labValues[parameter.code] ?? parameter.value),
+          criticalMin: parameter.criticalMin ?? null,
+          criticalMax: parameter.criticalMax ?? null,
           ...(reference ? { refMin: reference.min === '' ? null : reference.min, refMax: reference.max === '' ? null : reference.max, referenceVerified: reference.verified, referenceSource: reference.source.trim(), methodPopulation: reference.context.trim() } : {}),
         };
       });
@@ -611,6 +673,14 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
           },
         ],
       });
+      setPoSupplier('');
+      setPoInvoiceNo('');
+      setPoMedId('');
+      setPoVatRate('');
+      setPoUnitCost('');
+      setPoQty(1);
+      setPoBatch('');
+      setPoExpiry('');
       await onRefreshWorkspace();
       const poObj = created.purchaseOrder || (created as any);
       setFeedback({
@@ -641,6 +711,13 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         findings: radFindings,
         impression: radImpression,
       });
+      setRadVisitId('');
+      setRadModality('');
+      setRadTariff('');
+      setRadExamName('');
+      setRadIndication('');
+      setRadFindings('');
+      setRadImpression('');
       await onRefreshWorkspace();
       setFeedback({
         type: 'success',
@@ -963,6 +1040,31 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                 className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
               />
             </div>
+            {newMedStock > 0 && (
+              <>
+                <div>
+                  <label className="block font-semibold mb-1">Nomor Batch Awal *</label>
+                  <input
+                    type="text"
+                    required
+                    value={newMedBatch}
+                    onChange={(e) => setNewMedBatch(e.target.value.toUpperCase())}
+                    placeholder="BATCH-01"
+                    className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold mb-1">Kedaluwarsa Batch Awal *</label>
+                  <input
+                    type="date"
+                    required
+                    value={newMedExpiry}
+                    onChange={(e) => setNewMedExpiry(e.target.value)}
+                    className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           </div>
@@ -1084,7 +1186,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
           </div>
 
           <div className="min-w-0 grid grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-form-min-inline-size)),1fr))] gap-4">
-            {orderPage.bar}{orderPage.rows.map((order) => {
+            {orderPage.rows.map((order) => {
               const isDispensed = order.status === 'DISERAHKAN';
               const totalResepValue = order.items.reduce(
                 (s, i) => s + i.quantity * i.unitPrice,
@@ -1243,6 +1345,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               );
             })}
           </div>
+          {orderPage.bar}
         </div>
       )}
 
@@ -1293,7 +1396,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               </thead>
               <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
                 {stockOpnameRows.length === 0 && <tr><td colSpan={9} className="px-4 py-5 text-slate-500">Belum ada batch obat.</td></tr>}
-                {opnamePage.bar}{opnamePage.rows.map((row) => {
+                {opnamePage.rows.map((row) => {
                   const hasPhysicalCount = Object.prototype.hasOwnProperty.call(opnameDrafts, row.rowKey);
                   const hasDiff = hasPhysicalCount && row.diffQty !== 0;
                   return (
@@ -1401,6 +1504,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               </tbody>
             </table>
           </div>
+          {opnamePage.bar}
             {/* Batch Opname Save Bar */}
             <div className="flex flex-wrap items-end justify-between gap-3 p-3 sm:p-4 border-t border-[#E2ECE8] dark:border-[#183831] text-xs">
               <div className="min-w-0 w-full sm:flex-1 sm:min-w-(--kael-field-min-inline-size) space-y-1">
@@ -1759,7 +1863,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
-                  {mutationPage.bar}{mutationPage.rows.map((mut) => {
+                  {mutationPage.rows.map((mut) => {
                     const isIncoming = mut.quantityChange > 0;
                     return (
                       <tr
@@ -1837,6 +1941,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                 </tbody>
               </table>
             </div>
+            {mutationPage.bar}
           </div>
         </div>
       )}
@@ -1902,7 +2007,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                     Panel Parameter Uji
                   </label>
                   <div className="min-w-0 grid grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-field-min-inline-size)),1fr))] gap-1">
-                    {['HGB', 'WBC', 'PLT', 'GDS', 'CHOL', 'UA', 'CREAT', 'SGOT'].map((code) => (
+                    {['HGB', 'WBC', 'PLT', 'HCT', 'GDS', 'GDP', 'CHOL', 'UA', 'CREAT', 'NS1'].map((code) => (
                       <label key={code} className="flex items-center gap-1.5">
                         <input
                           type="checkbox"
@@ -2021,7 +2126,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                         const referenceVerified = reference ? reference.verified && !!reference.source.trim() : param.referenceVerified === true && !!param.referenceSource?.trim();
                         const refMin = reference ? (reference.min === '' ? null : reference.min) : param.refMin;
                         const refMax = reference ? (reference.max === '' ? null : reference.max) : param.refMax;
-                        const rangeFlag = currentVal === null || !Number.isFinite(currentVal) ? null : evaluateLabFlag(Number(currentVal), refMin, refMax, undefined, undefined, referenceVerified);
+                        const rangeFlag = currentVal === null || !Number.isFinite(currentVal) ? null : evaluateLabFlag(Number(currentVal), refMin, refMax, param.criticalMin, param.criticalMax, referenceVerified);
                         return (
                           <tr key={param.code}>
                             <td className="py-2.5 px-3 font-semibold">
@@ -2212,7 +2317,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E2ECE8] dark:divide-[#183831]">
-                  {purchasePage.bar}{purchasePage.rows.map((po) => (
+                  {purchasePage.rows.map((po) => (
                     <tr key={po.id}>
                       <td className="py-3 px-4 font-mono">
                         <div className="font-bold text-[#00897B]">{po.poNumber}</div>
@@ -2243,6 +2348,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                 </tbody>
               </table>
             </div>
+            {purchasePage.bar}
           </div>
         </div>
       )}

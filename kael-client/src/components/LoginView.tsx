@@ -85,6 +85,10 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess }) => {
   const closeOverlay = () => {
     setActiveOverlay(null);
     setPendingConnection(null);
+    setShowProfileEditor(false);
+    setEditingProfileId(undefined);
+    setProfileError(null);
+    setProfileNotice(null);
     setServerUrl(getServerOrigin());
     setServerConfigError(null);
   };

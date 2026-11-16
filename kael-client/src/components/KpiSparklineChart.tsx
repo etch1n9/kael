@@ -125,14 +125,16 @@ interface ChartMeasurements {
 }
 
 function formatAxisCompactRupiah(val: number): string {
-  if (val >= 1_000_000) {
-    const jt = val / 1_000_000;
-    return `${jt % 1 === 0 ? jt.toFixed(0) : jt.toFixed(1)}jt`;
+  const sign = val < 0 ? '-' : '';
+  const abs = Math.abs(val);
+  if (abs >= 1_000_000) {
+    const jt = abs / 1_000_000;
+    return `${sign}${jt % 1 === 0 ? jt.toFixed(0) : jt.toFixed(1)}jt`;
   }
-  if (val >= 1_000) {
-    return `${Math.round(val / 1_000)}rb`;
+  if (abs >= 1_000) {
+    return `${sign}${Math.round(abs / 1_000)}rb`;
   }
-  return String(Math.round(val));
+  return `${sign}${Math.round(abs)}`;
 }
 
 export const KpiSparklineCanvas: React.FC<KpiSparklineCanvasProps> = ({
@@ -186,11 +188,15 @@ export const KpiSparklineCanvas: React.FC<KpiSparklineCanvasProps> = ({
       : activeValues;
 
   const rawMax = Math.max(...allRelevantValues, 1_000_000);
-  const domainMin = 0;
+  const rawMin = Math.min(0, ...allRelevantValues);
+  const domainMin = rawMin < 0 ? rawMin * 1.12 : 0;
   const domainMax = rawMax * 1.12;
   const domainSpan = Math.max(1, domainMax - domainMin);
   const axisRatios = [1, 0.66, 0.33, 0];
-  const axisLabels = axisRatios.map((ratio) => ratio === 0 ? '0' : formatAxisCompactRupiah(rawMax * ratio));
+  const axisLabels = axisRatios.map((ratio) => {
+    const value = domainMin + (domainMax - domainMin) * ratio;
+    return Math.abs(value) < 1 ? '0' : formatAxisCompactRupiah(value);
+  });
   const measurementContent = JSON.stringify([axisLabels, series.map((point) => point.label), activeMetrics.formattedPeriodBadge, activeDeltas]);
 
   useLayoutEffect(() => {

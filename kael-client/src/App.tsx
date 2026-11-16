@@ -125,7 +125,6 @@ export default function App() {
   const sidebarRef = useRef<HTMLElement>(null);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mainViewportRef = useRef<HTMLElement>(null);
-  const [miniFlyoutCategory, setMiniFlyoutCategory] = useState<NavGroupKey | null>(null);
   // Open each navigation group when its destination is selected.
   const [expandedGroups, setExpandedGroups] = useState<Record<NavGroupKey, boolean>>({
     PENDAFTARAN_ADMISI: false,
@@ -160,7 +159,6 @@ export default function App() {
   const navigateAndExpandCategory = useCallback((targetModule: ModuleKey) => {
     setActiveModule(targetModule);
     setMobileNavOpen(false);
-    setMiniFlyoutCategory(null);
     const groupByModule: Partial<Record<ModuleKey, NavGroupKey>> = {
       SEMUA_PASIEN: 'PENDAFTARAN_ADMISI',
       PENDAFTARAN: 'PENDAFTARAN_ADMISI',
@@ -202,7 +200,10 @@ export default function App() {
   }, [activeModule]);
 
   useEffect(() => {
-    if (!commandOpen) return;
+    if (!commandOpen) {
+      setCommandQuery('');
+      return;
+    }
     const dialog = commandDialogRef.current;
     if (!dialog) return;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -219,7 +220,6 @@ export default function App() {
     if (session) return;
     setMobileNavOpen(false);
     setCommandOpen(false);
-    setMiniFlyoutCategory(null);
   }, [session]);
 
   useEffect(() => {
@@ -301,11 +301,9 @@ export default function App() {
         e.preventDefault();
         if (!isNarrowLayout) setIsSidebarCollapsed((prev) => !prev);
         else { setIsSidebarCollapsed(false); setMobileNavOpen((prev) => !prev); }
-        setMiniFlyoutCategory(null);
       }
       if (e.key === 'Escape') {
         setCommandOpen(false);
-        setMiniFlyoutCategory(null);
       }
       if (e.altKey && session && workspace) {
         const keyMap: Record<string, ModuleKey> = {
@@ -538,9 +536,7 @@ export default function App() {
                     data-testid="sidebar-toggle-btn"
                     onClick={() => {
                       setIsSidebarCollapsed(false);
-                      setMiniFlyoutCategory(null);
                     }}
-                    title="Perluas menu kiri (Ctrl+B)"
                     aria-label="Perluas menu kiri"
                     className="p-1.5 rounded-xl text-[#9BC4BC] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
                   >
@@ -558,19 +554,16 @@ export default function App() {
                       type="button"
                       data-testid="nav-mini-DASHBOARD"
                       onClick={() => {
-                        setActiveModule('DASHBOARD');
-                        setMobileNavOpen(false);
-                        setMiniFlyoutCategory(null);
+                        navigateAndExpandCategory('DASHBOARD');
                       }}
-                      title={topItem.label}
                       aria-label={topItem.label}
                       className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer ${
-                        activeModule === 'DASHBOARD' && !miniFlyoutCategory
+                        visibleModule === 'DASHBOARD'
                           ? 'bg-white/15 text-white font-semibold'
                           : 'text-[#9BC4BC] hover:bg-white/10 hover:text-white'
                       }`}
                     >
-                      {activeModule === 'DASHBOARD' && !miniFlyoutCategory && (
+                      {visibleModule === 'DASHBOARD' && (
                         <span
                           aria-hidden="true"
                           className="absolute left-0 top-2 bottom-2 w-1 rounded-full bg-[#E5A93C]"
@@ -591,8 +584,7 @@ export default function App() {
                       icon: Activity,
                     };
                     const IconComp = meta.icon;
-                    const isCategoryActive =
-                      items.some((i) => i.key === activeModule) || miniFlyoutCategory === cat;
+                    const isCategoryActive = items.some((i) => i.key === visibleModule);
 
                     return (
                       <button
@@ -600,12 +592,10 @@ export default function App() {
                         type="button"
                         data-testid={`nav-mini-cat-${cat}`}
                         onClick={() => {
-                          if (!items.some((i) => i.key === activeModule)) {
-                            setActiveModule(items[0].key);
-                          }
-                          setMiniFlyoutCategory((prev) => (prev === cat ? null : cat));
+                          const currentIndex = items.findIndex((i) => i.key === visibleModule);
+                          const nextItem = currentIndex >= 0 ? items[(currentIndex + 1) % items.length] : items[0];
+                          navigateAndExpandCategory(nextItem.key);
                         }}
-                        title={NAV_GROUP_TITLES[cat]}
                         aria-label={NAV_GROUP_TITLES[cat]}
                         className={`relative w-full py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 transition-colors cursor-pointer ${
                           isCategoryActive
@@ -628,54 +618,6 @@ export default function App() {
                   })}
                 </nav>
               </div>
-
-              {/* Floating Subcategory Flyout when a Category is clicked in Mini Mode */}
-              {miniFlyoutCategory && (
-                <div
-                  data-testid="mini-sidebar-flyout"
-                  className="kael-nav-flyout absolute top-16 rounded-2xl bg-[#0C3B33] dark:bg-[#072620] border border-[#1E5B4F] shadow-xl p-2.5 space-y-1 z-50"
-                >
-                  <div className="px-2.5 py-1.5 flex items-center justify-between border-b border-[#164E44]">
-                    <span className="text-caption font-bold uppercase tracking-wider text-[#9BC4BC]">
-                      {NAV_GROUP_TITLES[miniFlyoutCategory]}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setMiniFlyoutCategory(null)}
-                      className="text-caption text-[#9BC4BC] hover:text-white cursor-pointer"
-                    >
-                      Tutup
-                    </button>
-                  </div>
-                  <div className="pt-1 space-y-0.5">
-                    {allowedNavItems
-                      .filter((item) => item.category === miniFlyoutCategory)
-                      .map((item) => {
-                        const SubIcon = item.icon;
-                        const isSubActive = activeModule === item.key;
-                        return (
-                          <button
-                            key={item.key}
-                            type="button"
-                            onClick={() => {
-                              setActiveModule(item.key);
-                              setMobileNavOpen(false);
-                              setMiniFlyoutCategory(null);
-                            }}
-                            className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-left text-xs transition-colors cursor-pointer ${
-                              isSubActive
-                                ? 'bg-white/15 text-white font-semibold'
-                                : 'text-[#C8E4DD] hover:bg-white/10 hover:text-white'
-                            }`}
-                          >
-                            <SubIcon className="w-3.5 h-3.5 shrink-0 text-[#80CBC4]" />
-                            <span className="truncate">{item.label}</span>
-                          </button>
-                        );
-                      })}
-                  </div>
-                </div>
-              )}
 
               {/* Minimalist Bottom User Avatar & Logout Icon */}
               <div className="p-2.5 border-t border-[#185247] bg-[#0A332C] flex flex-col items-center gap-2">
@@ -782,12 +724,12 @@ export default function App() {
                         type="button"
                         onClick={() => { setActiveModule('DASHBOARD'); setMobileNavOpen(false); }}
                         className={`group relative w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer ${
-                          activeModule === 'DASHBOARD'
+                          visibleModule === 'DASHBOARD'
                             ? 'bg-white/10 text-white font-semibold'
                             : 'text-[#C8E4DD] hover:bg-white/5 hover:text-white'
                         }`}
                       >
-                        {activeModule === 'DASHBOARD' && (
+                        {visibleModule === 'DASHBOARD' && (
                           <span
                             aria-hidden="true"
                             className="absolute left-0 top-1.5 bottom-1.5 w-1 rounded-full bg-[#E5A93C]"
@@ -823,12 +765,12 @@ export default function App() {
                           <div className="space-y-0.5 pl-1">
                             {items.map((item) => {
                               const IconComp = item.icon;
-                              const isActive = activeModule === item.key;
+                              const isActive = visibleModule === item.key;
                               return (
                                 <button
                                   key={item.key}
                                   type="button"
-                                  onClick={() => { setActiveModule(item.key); setMobileNavOpen(false); }}
+                                  onClick={() => { navigateAndExpandCategory(item.key); }}
                                   className={`group relative w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer ${
                                     isActive
                                       ? 'bg-white/10 text-white font-semibold'
@@ -915,7 +857,7 @@ export default function App() {
                 type="button"
                 onClick={() => setCommandOpen(true)}
                 aria-label="Cari pasien atau menu"
-                className="px-3 py-1.5 text-xs font-medium rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#EBF4F1] transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                className="px-3 py-1.5 text-xs font-medium rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0B211D] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#EBF4F1] dark:hover:bg-[#11302A] transition-colors flex items-center gap-2 whitespace-nowrap cursor-pointer"
               >
                 <Search className="w-3.5 h-3.5 text-[#00897B]" />
                 <span className="hidden md:inline">Cari pada daftar...</span>
@@ -1035,7 +977,7 @@ export default function App() {
                     onRefreshWorkspace={() => fetchActiveWorkspace(session)}
                     onSelectVisitForRme={(visitId) => {
                       setSelectedRmeVisitId(visitId);
-                      setActiveModule('RME_DOKTER');
+                      navigateAndExpandCategory('RME_DOKTER');
                     }}
                   />
                 )}
@@ -1208,7 +1150,7 @@ export default function App() {
                         key={item.key}
                         type="button"
                         onClick={() => {
-                          setActiveModule(item.key);
+                          navigateAndExpandCategory(item.key);
                           setCommandOpen(false);
                         }}
                         className="text-left px-3 py-2 rounded-xl border border-[#E2ECE8] dark:border-[#183831] hover:bg-[#EBF4F1] dark:hover:bg-[#12352E] flex items-center justify-between cursor-pointer"

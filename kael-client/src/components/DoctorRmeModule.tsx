@@ -157,6 +157,9 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
   // Sync form when activeVisit or initialSubView changes
   useEffect(() => {
     if (!activeVisit) return;
+    setStatusBanner(null);
+    setIcd10Search('');
+    setShowPatientHistory(false);
     setCorrectionReason('');
     setSelectedMedId(''); setRxDosage(''); setRxSigna(''); setRxQuantity(1);
     setSelectedIcd9Code(''); setProcedureTariff('');
@@ -165,9 +168,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     setShowOdontogram(
       initialSubView === 'GIGI_ODONTOGRAM' || /gigi/i.test(`${dentalUnit?.unitName || ''} ${activeVisit.polyclinic}`)
     );
-    if (initialSubView === 'MCU_SURAT_MEDIS') {
-      setShowPrintCertificate(true);
-    }
+    setShowPrintCertificate(initialSubView === 'MCU_SURAT_MEDIS');
     if (existingSoap) {
       setChiefComplaint(existingSoap.subjective.chiefComplaint);
       setHistoryPresent(existingSoap.subjective.historyOfPresentIllness);
@@ -310,6 +311,10 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
         unitPrice: med.sellPrice,
       },
     ]);
+    setSelectedMedId('');
+    setRxDosage('');
+    setRxSigna('');
+    setRxQuantity(1);
   };
 
   const handleAddProcedure = () => {
@@ -327,6 +332,8 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
         ...(procedureTariff === '' ? {} : { tariff: procedureTariff }),
       },
     ]);
+    setSelectedIcd9Code('');
+    setProcedureTariff('');
   };
 
   const toggleLabParam = (code: string) => {
@@ -385,8 +392,8 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
       await onRefreshWorkspace();
       setStatusBanner({
         type: 'success',
-        text: result.soapRecord.recordStatus === 'ADDENDUM_APPENDED'
-          ? 'Addendum rekam medis berhasil disimpan. Pengiriman ke SATUSEHAT belum dikonfirmasi.'
+        text: result.soapRecord.recordStatus === 'AMENDED_WITHIN_48H' || result.soapRecord.recordStatus === 'ADDENDUM_APPENDED'
+          ? 'Koreksi / addendum rekam medis berhasil disimpan. Pengiriman ke SATUSEHAT belum dikonfirmasi.'
           : `RME SOAP berhasil disimpan. Permintaan SATUSEHAT dicatat dalam antrean lokal; pengiriman ke provider belum dikonfirmasi.${result.invoice ? ` Tagihan ${result.invoice.invoiceNumber} tersedia di kasir.` : ''}`,
       });
     } catch (err) {
@@ -589,7 +596,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
               facilityName={workspace.activeFacility.name}
               facilityCode={facilityCode}
               columns={rmeExportColumns}
-              rows={workspace.soapRecords}
+              rows={workspace.soapRecords.filter((s) => s.patientId === activePatient.id)}
               compact
             />
           </div>
@@ -604,24 +611,36 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
 
           {initialSubView === 'BEDAH_IBS' && (
             <div className="pt-3 border-t border-[#E2ECE8] dark:border-[#183831] space-y-2 text-xs">
-              <form className="grid gap-2 md:grid-cols-4" onSubmit={async (event) => {
-                event.preventDefault();
-                await kaelApi.scheduleSurgery(token, facilityCode, {
-                  procedureName: surgeryName,
-                  scheduledStart: surgeryAt,
-                  patientName: activeVisit.patientName,
-                  mrNumber: activeVisit.mrNumber,
-                  operatingRoomCode: surgeryRoom,
-                  surgeonName: workspace.user.fullName,
-                });
-                setSurgeryName('');
-                await onRefreshWorkspace();
-              }}>
-                <input required value={surgeryName} onChange={(event) => setSurgeryName(event.target.value)} placeholder="Nama tindakan" className="rounded border px-2 py-1.5" />
-                <input required type="datetime-local" value={surgeryAt} onChange={(event) => setSurgeryAt(event.target.value)} className="rounded border px-2 py-1.5" />
-                <input required value={surgeryRoom} onChange={(event) => setSurgeryRoom(event.target.value)} placeholder="Kamar operasi" className="rounded border px-2 py-1.5" />
-                <button type="submit" className="rounded bg-[#00897B] px-3 py-1.5 font-semibold text-white">Jadwalkan</button>
-              </form>
+              <div className="grid gap-2 md:grid-cols-4">
+                <input value={surgeryName} onChange={(event) => setSurgeryName(event.target.value)} placeholder="Nama tindakan" className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-2 py-1.5" />
+                <input type="datetime-local" value={surgeryAt} onChange={(event) => setSurgeryAt(event.target.value)} className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-2 py-1.5" />
+                <input value={surgeryRoom} onChange={(event) => setSurgeryRoom(event.target.value)} placeholder="Kamar operasi" className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-2 py-1.5" />
+                <button type="button" onClick={async () => {
+                  if (!surgeryName.trim() || !surgeryAt || !surgeryRoom.trim()) {
+                    setStatusBanner({ type: 'error', text: 'Isi nama tindakan, jadwal, dan kamar operasi terlebih dahulu.' });
+                    return;
+                  }
+                  try {
+                    await kaelApi.scheduleSurgery(token, facilityCode, {
+                      procedureName: surgeryName.trim(),
+                      scheduledStart: surgeryAt,
+                      patientId: activePatient.id,
+                      visitId: activeVisit.id,
+                      patientName: activeVisit.patientName,
+                      mrNumber: activeVisit.mrNumber,
+                      operatingRoomCode: surgeryRoom.trim(),
+                      surgeonName: workspace.user.fullName,
+                    });
+                    setSurgeryName('');
+                    setSurgeryAt('');
+                    setSurgeryRoom('');
+                    await onRefreshWorkspace();
+                    setStatusBanner({ type: 'success', text: 'Jadwal operasi IBS berhasil disimpan.' });
+                  } catch (err) {
+                    setStatusBanner({ type: 'error', text: err instanceof Error ? err.message : 'Gagal menjadwalkan operasi IBS.' });
+                  }
+                }} className="rounded bg-[#00897B] hover:bg-[#00796B] px-3 py-1.5 font-semibold text-white cursor-pointer">Jadwalkan</button>
+              </div>
               <div className="font-bold text-[#0F2922] dark:text-white">
                 Jadwal Operasi &amp; Status Checklist Tercatat ({(workspace.surgicalSchedules || []).length})
               </div>

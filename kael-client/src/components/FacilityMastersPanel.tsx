@@ -33,6 +33,7 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
   const [payerBpjs, setPayerBpjs] = useState(false);
   const [className, setClassName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const addUnit = () => {
@@ -53,6 +54,7 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
     setUnitChoice('');
     setCustomUnitName('');
     setError(null);
+    setNotice(null);
   };
   const addPayer = () => {
     const code = masterCode(payerName);
@@ -62,6 +64,7 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
     setPayerName('');
     setPayerBpjs(false);
     setError(null);
+    setNotice(null);
   };
   const addClass = () => {
     const code = masterCode(className);
@@ -70,11 +73,13 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
     setBedClasses((current) => [...current, { code, name: className.trim(), active: true }]);
     setClassName('');
     setError(null);
+    setNotice(null);
   };
 
   const save = async () => {
     setSaving(true);
     setError(null);
+    setNotice(null);
     try {
       await kaelApi.superuserPublishFacilityConfig(token, facilityCode, facilityCode, {
         units,
@@ -83,6 +88,7 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
         changeNotes: 'Master unit, penjamin, dan kelas kamar diperbarui superuser.',
       });
       await onSaved();
+      setNotice('Master unit, penjamin, dan kelas kamar berhasil disimpan.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Master belum tersimpan.');
     } finally {
@@ -173,8 +179,9 @@ export const FacilityMastersPanel: React.FC<FacilityMastersPanelProps> = ({
         />
       </section>
 
-      {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">{error}</p>}
-      <button type="button" disabled={saving} onClick={() => void save()} className="rounded-xl bg-[#0F2922] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60">
+      {error && <p role="alert" className="rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/50 px-3 py-2 text-xs text-red-800 dark:text-red-200">{error}</p>}
+      {notice && <p role="status" className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 px-3 py-2 text-xs text-emerald-800 dark:text-emerald-200">{notice}</p>}
+      <button type="button" disabled={saving} onClick={() => void save()} className="rounded-xl bg-[#0F2922] dark:bg-[#00897B] hover:bg-[#00796B] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 cursor-pointer">
         {saving ? 'Menyimpan…' : 'Simpan master untuk akun lain'}
       </button>
     </div>
@@ -194,11 +201,18 @@ export function FacilityMastersGate({
 }) {
   const facilities = (workspace.allFacilities || []).filter((facility) => facility.active);
   const [chosen, setChosen] = useState(facilityCode || facilities[0]?.code || '');
+  React.useEffect(() => {
+    if (facilityCode && facilities.some((f) => f.code === facilityCode)) {
+      setChosen(facilityCode);
+    } else if (!facilities.some((f) => f.code === chosen)) {
+      setChosen(facilities[0]?.code || '');
+    }
+  }, [facilityCode, facilities, chosen]);
   const facility = facilities.find((entry) => entry.code === chosen);
   const stored = (workspace.facilityConfigHistory || []).find(
     (entry) => entry.facilityCode === chosen && entry.lifecycleStage === 'ACTIVE',
   );
-  const snapshot = facilityCode && workspace.activeFacilityConfig?.facilityCode === facilityCode
+  const snapshot = chosen && workspace.activeFacilityConfig?.facilityCode === chosen
     ? workspace.activeFacilityConfig
     : stored || (facility ? buildDefaultFacilityConfigSnapshot(facility) : null);
   if (!facilities.length) {

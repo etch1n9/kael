@@ -202,6 +202,14 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
   );
 
   useEffect(() => {
+    setNodeName(workspace.serverConfig.nodeName);
+    setSatusehatBaseUrl(workspace.serverConfig.satusehatBaseUrl);
+    setBpjsBaseUrl(workspace.serverConfig.bpjsBaseUrl);
+    setIomtPort(workspace.serverConfig.iomtListenPort);
+    setSessionTimeout(workspace.serverConfig.sessionTimeoutMinutes);
+  }, [workspace.serverConfig]);
+
+  useEffect(() => {
     if (!roles.some((entry) => entry.id === role && entry.active)) {
       setRole('');
     }
@@ -1169,7 +1177,13 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
                     <select
                       id="su-edit-role"
                       value={editUserRole}
-                      onChange={(e) => setEditUserRole(e.target.value as UserRole)}
+                      onChange={(e) => {
+                        const nextRole = e.target.value as UserRole;
+                        setEditUserRole(nextRole);
+                        if (nextRole !== 'SUPERUSER') {
+                          setEditUserFacilities((prev) => prev.filter((c) => c !== '*'));
+                        }
+                      }}
                       className="w-full px-2.5 py-1.5 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
                     >
                       {roles.filter((entry) => entry.active || entry.id === editUserRole).map((entry) => <option key={entry.id} value={entry.id} disabled={!entry.active}>{entry.name}{entry.active ? '' : ' (nonaktif)'}</option>)}
@@ -1410,10 +1424,11 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                disabled={currentSnapshot.configVersion <= 1 || isPublishingConfig}
                 onClick={() =>
                   handleRollbackCapabilityConfig(Math.max(1, currentSnapshot.configVersion - 1))
                 }
-                className="px-3.5 py-2 text-xs font-semibold rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 hover:bg-amber-100 cursor-pointer"
+                className="px-3.5 py-2 text-xs font-semibold rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 hover:bg-amber-100 disabled:opacity-50 cursor-pointer"
               >
                 Pulihkan konfigurasi sebelumnya
               </button>
@@ -1435,19 +1450,21 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
             try {
               await kaelApi.registerEvidence(token, facilityCode, { evidenceType, documentNumber: evidenceNumber, holderName: evidenceHolder, validUntil: evidenceUntil });
               setEvidenceNumber('');
+              setEvidenceHolder('');
+              setEvidenceUntil('');
               await onRefreshWorkspace();
               setFeedback({ type: 'success', text: 'Bukti fasilitas tersimpan dan terverifikasi.' });
             } catch (err) {
               setFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Bukti belum tersimpan.' });
             }
           }}>
-            <select value={evidenceType} onChange={(event) => setEvidenceType(event.target.value)} className="rounded border px-2 py-1.5">
+            <select value={evidenceType} onChange={(event) => setEvidenceType(event.target.value)} className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-2 py-1.5">
               {['SIP_NAKES', 'IZIN_OPERASIONAL', 'KALIBRASI_ALKES', 'MOU_PIHAK_KETIGA', 'IZIN_BAPETEN_RADIOLOGI'].map((kind) => <option key={kind} value={kind}>{kind}</option>)}
             </select>
-            <input required value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="Nomor dokumen" className="rounded border px-2 py-1.5" />
-            <input required value={evidenceHolder} onChange={(event) => setEvidenceHolder(event.target.value)} placeholder="Pemegang / penerbit" className="rounded border px-2 py-1.5" />
-            <input required type="date" value={evidenceUntil} onChange={(event) => setEvidenceUntil(event.target.value)} className="rounded border px-2 py-1.5" />
-            <button type="submit" className="rounded bg-teal-700 px-3 py-1.5 font-semibold text-white">Simpan bukti</button>
+            <input required value={evidenceNumber} onChange={(event) => setEvidenceNumber(event.target.value)} placeholder="Nomor dokumen" className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-2 py-1.5" />
+            <input required value={evidenceHolder} onChange={(event) => setEvidenceHolder(event.target.value)} placeholder="Pemegang / penerbit" className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-2 py-1.5" />
+            <input required type="date" value={evidenceUntil} onChange={(event) => setEvidenceUntil(event.target.value)} className="rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 px-2 py-1.5" />
+            <button type="submit" className="rounded bg-teal-700 hover:bg-teal-800 px-3 py-1.5 font-semibold text-white cursor-pointer">Simpan bukti</button>
           </form>
           <div className="grid min-w-0 [&>*]:min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-form-min-inline-size)),1fr))] gap-5 items-start">
             {/* Left 8 Cols: 3-Dimensional Sub-Capability Matrix */}

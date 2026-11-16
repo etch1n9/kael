@@ -1,4 +1,4 @@
-use crate::domain::fefo;
+use crate::domain::{fefo, measure, rupiah};
 use crate::http::{
     ApiError, ApiResult, App, RequestContext, array, array_mut, audit, bad_request, conflict, id,
     json_response, not_found, now, require_service, save, text,
@@ -44,7 +44,11 @@ pub(crate) fn stock_mutation(
     counterparty: &str,
     notes: &str,
 ) {
-    array_mut(&mut app.db,"medicationMutations").push(json!({"id":id("mut"),"facilityCode":ctx.facility_code,"timestamp":now(),"medicationId":med["id"],"medicationCode":med["code"],"medicationName":med["name"],"batchNumber":batch,"unit":med["unit"],"type":kind,"quantityChange":after-before,"stockBefore":before,"stockAfter":after,"unitPrice":price,"totalValue":(after-before).abs()*price,"referenceId":reference,"counterpartyOrPatient":counterparty,"actorName":ctx.user["fullName"],"notes":notes}));
+    let before = measure(before);
+    let after = measure(after);
+    let delta = measure(after - before);
+    let price = rupiah(price);
+    array_mut(&mut app.db,"medicationMutations").push(json!({"id":id("mut"),"facilityCode":ctx.facility_code,"timestamp":now(),"medicationId":med["id"],"medicationCode":med["code"],"medicationName":med["name"],"batchNumber":batch,"unit":med["unit"],"type":kind,"quantityChange":delta,"stockBefore":before,"stockAfter":after,"unitPrice":price,"totalValue":rupiah(delta.abs()*price),"referenceId":reference,"counterpartyOrPatient":counterparty,"actorName":ctx.user["fullName"],"notes":notes}));
 }
 
 pub fn handle(
@@ -119,9 +123,10 @@ fn create(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     }
     let batch = text(body, "initialBatchNumber").trim().to_uppercase();
     let expiry = text(body, "initialExpiryDate");
-    if stock > 0.0 && (batch.is_empty() || !valid_date(expiry)) {
+    let today = &now()[..10];
+    if stock > 0.0 && (batch.is_empty() || !valid_date(expiry) || expiry < today) {
         return Err(bad_request(
-            "Nomor batch dan tanggal kedaluwarsa wajib diisi untuk stok awal.",
+            "Nomor batch dan tanggal kedaluwarsa aktif wajib diisi untuk stok awal.",
         ));
     }
     let batches = if stock > 0.0 {
@@ -172,9 +177,10 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
     let batch = text(body, "batchNumber").trim().to_uppercase();
     let expiry = text(body, "expiryDate");
     let qty = n(body, "quantity");
-    if batch.is_empty() || !valid_date(expiry) || !qty.is_finite() || qty <= 0.0 {
+    let today = &now()[..10];
+    if batch.is_empty() || !valid_date(expiry) || expiry < today || !qty.is_finite() || qty <= 0.0 {
         return Err(bad_request(
-            "Nomor Batch, Tanggal Kedaluwarsa, dan Jumlah Stok Masuk (> 0) wajib diisi.",
+            "Nomor Batch, Tanggal Kedaluwarsa aktif, dan Jumlah Stok Masuk (> 0) wajib diisi.",
         ));
     }
     let batch_index = array(&med, "batches")
@@ -184,11 +190,19 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
         .map(|i| n(&array(&med, "batches")[i], "stock"))
         .unwrap_or(0.0);
     if let Some(i) = batch_index {
-        array_mut(&mut med, "batches")[i]["stock"] = json!(before + qty);
-        array_mut(&mut med, "batches")[i]["expiryDate"] = json!(expiry);
+        let existing_ed = text(&array(&med, "batches")[i], "expiryDate");
+        if !existing_ed.is_empty() && existing_ed != expiry {
+            return Err(conflict(
+                "Nomor batch ini sudah terdaftar dengan tanggal kedaluwarsa yang berbeda.",
+            ));
+        }
+        array_mut(&mut med, "batches")[i]["stock"] = json!(measure(before + qty));
     } else {
         array_mut(&mut med, "batches")
-            .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":qty}));
+            .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":measure(qty)}));
+    }
+    if let Some(new_buy) = body.get("buyPrice").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) {
+        med["buyPrice"] = json!(rupiah(new_buy));
     }
     let supplier = text(body, "supplierName").trim();
     let notes = format!("Penerimaan stok masuk Batch {batch} (ED {expiry}) dari {supplier}");
@@ -451,11 +465,11 @@ fn opname(
                     text(&med, "name")
                 ))
             })?;
-        let actual = n(&item, "actualStock");
+        let actual = measure(n(&item, "actualStock"));
         if item.get("actualStock").is_none() || !actual.is_finite() || actual < 0.0 {
             return Err(bad_request("Stok fisik harus berupa angka nonnegatif."));
         }
-        let previous = n(&array(&med, "batches")[batch_index], "stock");
+        let previous = measure(n(&array(&med, "batches")[batch_index], "stock"));
         array_mut(&mut med, "batches")[batch_index]["stock"] = json!(actual);
         if actual != previous || medication_id.is_some() {
             stock_mutation(

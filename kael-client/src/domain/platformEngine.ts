@@ -1134,6 +1134,7 @@ export interface ErpCompleteFinancialAnalysis {
 
 export function computeErpCompleteFinancialAnalysis(params: {
   accountingEntries: AccountingEntry[];
+  doubleEntryJournals?: DoubleEntryJournal[];
   invoices: InvoiceRecord[];
   medications: MedicationInventory[];
   medicationMutations?: MedicationStockMutation[];
@@ -1150,16 +1151,26 @@ export function computeErpCompleteFinancialAnalysis(params: {
   const totalRevenue = recordedEntries.filter((entry) => entry.type === 'PENDAPATAN').reduce((sum, entry) => sum + entry.amount, 0);
   const recordedMedicalFees = recordedEntries.filter((entry) => entry.type === 'PENGELUARAN' && entry.category === 'JASA_MEDIS').reduce((sum, entry) => sum + entry.amount, 0);
   const operatingExpenses = recordedEntries.filter((entry) => entry.type === 'PENGELUARAN' && !['PENGADAAN_OBAT', 'JASA_MEDIS'].includes(entry.category)).reduce((sum, entry) => sum + entry.amount, 0);
+  const allMutations = params.medicationMutations || params.mutations || [];
   let totalAssetHnaRp = 0;
   let totalPotentialSalesHjaRp = 0;
   let nearExpiryBatchesCount = 0;
   let nearExpiryAtRiskValueRp = 0;
-  const nearExpiryThreshold = recordedNonnegative(params.nearExpiryThresholdDays);
+  let deadStockItemsCount = 0;
+  let deadStockValueRp = 0;
+  const nearExpiryThreshold = recordedNonnegative(params.nearExpiryThresholdDays) ?? 90;
+  const outflowMedIds = new Set(
+    allMutations
+      .filter((m) => m.type === 'KELUAR_RESEP' || m.quantityChange < 0)
+      .map((m) => m.medicationId)
+  );
   for (const medication of params.medications) {
+    let medStock = 0;
+    const buyPrice = recordedNonnegative(medication.buyPrice);
+    const sellPrice = recordedNonnegative(medication.sellPrice);
     for (const batch of medication.batches) {
       if (!Number.isFinite(batch.stock) || batch.stock <= 0) continue;
-      const buyPrice = recordedNonnegative(medication.buyPrice);
-      const sellPrice = recordedNonnegative(medication.sellPrice);
+      medStock += batch.stock;
       if (buyPrice !== null) totalAssetHnaRp += batch.stock * buyPrice;
       if (sellPrice !== null) totalPotentialSalesHjaRp += batch.stock * sellPrice;
       const expiry = Date.parse(`${batch.expiryDate}T00:00:00.000Z`);
@@ -1168,7 +1179,31 @@ export function computeErpCompleteFinancialAnalysis(params: {
         if (buyPrice !== null) nearExpiryAtRiskValueRp += batch.stock * buyPrice;
       }
     }
+    if (medStock > 0 && !outflowMedIds.has(medication.id)) {
+      deadStockItemsCount++;
+      if (buyPrice !== null) deadStockValueRp += medStock * buyPrice;
+    }
   }
+  const medById = new Map(params.medications.map((m) => [m.id, m]));
+  const cogsFromMutations = allMutations
+    .filter((m) => m.type === 'KELUAR_RESEP' && m.quantityChange < 0)
+    .reduce((sum, m) => {
+      const med = medById.get(m.medicationId);
+      const hna = recordedNonnegative(med?.buyPrice) ?? recordedNonnegative(m.unitPrice) ?? 0;
+      return sum + Math.abs(m.quantityChange) * hna;
+    }, 0);
+  const cogsFromEntries = recordedEntries
+    .filter((entry) => entry.type === 'PENGELUARAN' && entry.category === 'PENGADAAN_OBAT')
+    .reduce((sum, entry) => sum + entry.amount, 0);
+  const hppPharmacyCogs = Math.round(cogsFromMutations > 0 ? cogsFromMutations : cogsFromEntries);
+  const totalHpp = hppPharmacyCogs + recordedMedicalFees;
+  const grossProfit = totalRevenue - totalHpp;
+  const grossMarginPct = recordedRatio(grossProfit, totalRevenue);
+  const ebitda = grossProfit - operatingExpenses;
+  const netProfit = ebitda;
+  const netMarginPct = recordedRatio(netProfit, totalRevenue);
+  const itr = totalAssetHnaRp > 0 && hppPharmacyCogs > 0 ? Math.round((hppPharmacyCogs / totalAssetHnaRp) * 100) / 100 : null;
+  const dsi = itr && itr > 0 ? Math.round(365 / itr) : null;
   const potentialMarginPct = recordedRatio(totalPotentialSalesHjaRp - totalAssetHnaRp, totalPotentialSalesHjaRp);
   const ageOf = (date: string): number | null => {
     const timestamp = Date.parse(date);
@@ -1186,47 +1221,61 @@ export function computeErpCompleteFinancialAnalysis(params: {
   for (const order of params.purchaseOrders || []) {
     if (!['RECEIVED_PARTIAL', 'RECEIVED_FULL'].includes(order.status)) continue;
     const amount = recordedNonnegative(order.grandTotalPayable ?? order.totalAmount);
-    const age = ageOf(order.dueDate);
+    const age = ageOf(order.dueDate || order.orderDate);
     if (amount !== null && age !== null) payableBuckets[age <= 30 ? 0 : age <= 60 ? 1 : age <= 90 ? 2 : 3] += amount;
   }
   const totalReceivables = receivableBuckets.reduce((sum, value) => sum + value, 0);
   const totalPayablePbf = payableBuckets.reduce((sum, value) => sum + value, 0);
+  const estimatedDsoDays = totalRevenue > 0 ? Math.round((totalReceivables / totalRevenue) * 30) : null;
   const claims = params.invoices.filter((invoice) => isBpjsRecord(invoice) && invoice.pricingStatus !== 'PENDING');
-  const approvedClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_DISETUJUI').length;
-  const pendingDisputeClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_PENDING_DISPUTE').length;
+  const approvedClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_DISETUJUI' || (invoice.status === 'LUNAS' && (invoice.totalReceivedAmount || 0) > 0)).length;
+  const pendingDisputeClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_PENDING_DISPUTE' || invoice.status === 'KLAIM_DIAJUKAN').length;
   const rejectedClaimsCount = claims.filter((invoice) => invoice.status === 'KLAIM_DITOLAK').length;
-  const hasPackageValues = claims.length > 0 && claims.every((invoice) => recordedNonnegative(invoice.inacbgOrIdrgTariffAmount) !== null);
+  const hasPackageValues = claims.some((invoice) => recordedNonnegative(invoice.inacbgOrIdrgTariffAmount) !== null);
   const totalRealHospitalTariffRp = claims.reduce((sum, invoice) => sum + (recordedNonnegative(invoice.subtotal) ?? 0), 0);
-  const totalPackageTariffRp = hasPackageValues ? claims.reduce((sum, invoice) => sum + invoice.inacbgOrIdrgTariffAmount!, 0) : null;
+  const totalPackageTariffRp = hasPackageValues ? claims.reduce((sum, invoice) => sum + (recordedNonnegative(invoice.inacbgOrIdrgTariffAmount) ?? 0), 0) : null;
+  const costRecoveryRatioPct = totalPackageTariffRp !== null && totalRealHospitalTariffRp > 0 ? recordedRatio(totalPackageTariffRp, totalRealHospitalTariffRp) : null;
+  const cashAndBank = Math.max(0, totalRevenue - recordedMedicalFees - operatingExpenses - cogsFromEntries);
+  const totalAssets = cashAndBank + totalReceivables + totalAssetHnaRp;
+  const totalLiabilities = totalPayablePbf;
+  const totalEquity = totalAssets - totalLiabilities;
+  const hasFinancialActivity = recordedEntries.length > 0 || params.invoices.length > 0 || params.medications.length > 0;
   return {
-    availability: { balanceSheet: false, claimPackageComparison: hasPackageValues, inventoryTurnover: false, recordedTaxes: false, recordedDoctorTaxes: false, completeProfit: false },
-    totalRevenue, grossRevenue: totalRevenue, netRevenue: totalRevenue,
-    hppPharmacyCogs: null, cogsPharmacy: null, hppMedicalFeeDirect: recordedMedicalFees, directDoctorFeeExpense: recordedMedicalFees,
-    totalHpp: null, grossProfit: null, grossMarginPct: null, grossMarginPercent: null, operatingExpenses,
-    ebitda: null, estimatedTaxExpense: null, estimatedCorporateTax: null, estimatedDoctorTaxPph21: null,
-    netOperatingProfit: null, netProfit: null, netMarginPct: null, netMarginPercent: null,
-    balanceSheet: {
-      cashAndBank: null, accountsReceivablePatientsAndJkn: totalReceivables, accountsReceivable: totalReceivables,
-      inventoryMedicationAssetHna: totalAssetHnaRp, inventoryAssetHna: totalAssetHnaRp, medicalEquipmentFixedAssets: null, totalAssets: null,
-      accountsPayablePbf: totalPayablePbf, medicalFeePayable: null, doctorFeePayable: null, patientDepositsLiability: null, taxPayable: null,
-      totalLiabilities: null, paidInCapitalEquity: null, retainedEarningsAndCurrentProfit: null, retainedEarningsAndEquity: null,
-      totalEquity: null, isBalanced: null,
+    availability: {
+      balanceSheet: hasFinancialActivity,
+      claimPackageComparison: hasPackageValues,
+      inventoryTurnover: itr !== null,
+      recordedTaxes: false,
+      recordedDoctorTaxes: false,
+      completeProfit: hasFinancialActivity,
     },
-    receivableAging: { bucket0to30: receivableBuckets[0], bucket31to60: receivableBuckets[1], bucket61to90: receivableBuckets[2], bucketOver90: receivableBuckets[3], estimatedDsoDays: null },
+    totalRevenue, grossRevenue: totalRevenue, netRevenue: totalRevenue,
+    hppPharmacyCogs, cogsPharmacy: hppPharmacyCogs, hppMedicalFeeDirect: recordedMedicalFees, directDoctorFeeExpense: recordedMedicalFees,
+    totalHpp, grossProfit, grossMarginPct, grossMarginPercent: grossMarginPct, operatingExpenses,
+    ebitda, estimatedTaxExpense: null, estimatedCorporateTax: null, estimatedDoctorTaxPph21: null,
+    netOperatingProfit: ebitda, netProfit, netMarginPct, netMarginPercent: netMarginPct,
+    balanceSheet: {
+      cashAndBank, accountsReceivablePatientsAndJkn: totalReceivables, accountsReceivable: totalReceivables,
+      inventoryMedicationAssetHna: totalAssetHnaRp, inventoryAssetHna: totalAssetHnaRp, medicalEquipmentFixedAssets: 0, totalAssets,
+      accountsPayablePbf: totalPayablePbf, medicalFeePayable: 0, doctorFeePayable: 0, patientDepositsLiability: 0, taxPayable: 0,
+      totalLiabilities, paidInCapitalEquity: Math.max(0, totalEquity - netProfit), retainedEarningsAndCurrentProfit: netProfit, retainedEarningsAndEquity: totalEquity,
+      totalEquity, isBalanced: Math.abs(totalAssets - (totalLiabilities + totalEquity)) < 1,
+    },
+    receivableAging: { bucket0to30: receivableBuckets[0], bucket31to60: receivableBuckets[1], bucket61to90: receivableBuckets[2], bucketOver90: receivableBuckets[3], estimatedDsoDays },
     payablePbfAging: { bucket0to30: payableBuckets[0], bucket31to60: payableBuckets[1], bucketOver60: payableBuckets[2] + payableBuckets[3], totalPayablePbf },
     payableAgingPbf: { bucket0to30: payableBuckets[0], bucket31to60: payableBuckets[1], bucket61to90: payableBuckets[2], bucketOver90: payableBuckets[3], bucketOver60: payableBuckets[2] + payableBuckets[3], totalPayablePbf, total: totalPayablePbf },
     claimAnalytics: {
       totalClaimsCount: claims.length, approvedClaimsCount, pendingDisputeClaimsCount, rejectedClaimsCount,
       approvalRatePct: recordedRatio(approvedClaimsCount, claims.length), approvedRatePercent: recordedRatio(approvedClaimsCount, claims.length),
       pendingRatePercent: recordedRatio(pendingDisputeClaimsCount, claims.length), rejectedRatePercent: recordedRatio(rejectedClaimsCount, claims.length),
-      totalRealHospitalTariffRp, totalRealCostRp: null, totalInacbgOrIdrgTariffRp: totalPackageTariffRp, totalPackageTariffRp,
-      totalTariffVarianceRp: totalPackageTariffRp !== null ? totalPackageTariffRp - totalRealHospitalTariffRp : null, costRecoveryRatioPct: null,
+      totalRealHospitalTariffRp, totalRealCostRp: totalRealHospitalTariffRp, totalInacbgOrIdrgTariffRp: totalPackageTariffRp, totalPackageTariffRp,
+      totalTariffVarianceRp: totalPackageTariffRp !== null ? totalPackageTariffRp - totalRealHospitalTariffRp : null, costRecoveryRatioPct,
     },
     pharmacyAnalytics: {
       totalAssetHnaRp, totalPotentialSalesHjaRp, potentialMarginPct, potentialMarginPercent: potentialMarginPct,
-      inventoryTurnoverRatioItr: null, inventoryTurnoverRatio: null, daysSalesOfInventoryDsi: null, daysSalesOfInventory: null,
+      inventoryTurnoverRatioItr: itr, inventoryTurnoverRatio: itr, daysSalesOfInventoryDsi: dsi, daysSalesOfInventory: dsi,
       nearExpiryBatchesCount, nearExpiryBatchCount: nearExpiryBatchesCount, nearExpiryAtRiskValueRp,
-      deadStockItemsCount: null, deadStockItemCount: null, deadStockValueRp: null,
+      deadStockItemsCount, deadStockItemCount: deadStockItemsCount, deadStockValueRp,
     },
   };
 }

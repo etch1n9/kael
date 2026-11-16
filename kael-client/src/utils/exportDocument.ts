@@ -26,7 +26,12 @@ function escapeHtml(value: unknown): string {
 }
 
 function spreadsheetSafe(value: string): string {
-  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /^[=+\-@\t\r\n]|[\r\n][=+\-@\t]/.test(value) ? `'${value}` : value;
+}
+
+function sanitizeWorksheetName(title: string): string {
+  const cleaned = title.replace(/[\\/?*[\]:]/g, ' ').replace(/\s+/g, ' ').trim();
+  return (cleaned || 'Laporan KAEL').slice(0, 28);
 }
 
 function extractCellValue<T>(row: T, col: ExportColumn<T>): string {
@@ -89,13 +94,13 @@ export function exportToExcelXml<T>(payload: ExportDocumentPayload<T>): void {
       const cells = payload.columns
         .map((col) => {
           const val = spreadsheetSafe(extractCellValue(row, col));
-          const numericClean = val.replace(/[^0-9.-]/g, '');
+          const trimmed = val.trim();
+          const numericClean = trimmed.replace(/[^0-9.-]/g, '');
           const isStrictNum =
-            /^-?\d+(\.\d+)?$/.test(val.trim()) &&
-            !val.trim().startsWith('0') &&
+            /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(trimmed) &&
             numericClean.length < 15;
           if (isStrictNum) {
-            return `<Cell ss:StyleID="sBody"><Data ss:Type="Number">${Number(val)}</Data></Cell>`;
+            return `<Cell ss:StyleID="sBody"><Data ss:Type="Number">${Number(trimmed)}</Data></Cell>`;
           }
           return `<Cell ss:StyleID="sBody"><Data ss:Type="String">${escapeHtml(val)}</Data></Cell>`;
         })
@@ -136,7 +141,7 @@ export function exportToExcelXml<T>(payload: ExportDocumentPayload<T>): void {
    </Borders>
   </Style>
  </Styles>
- <Worksheet ss:Name="${escapeHtml(payload.title.slice(0, 28))}">
+ <Worksheet ss:Name="${escapeHtml(sanitizeWorksheetName(payload.title))}">
   <Table>
    <Row ss:Height="24">
     <Cell ss:StyleID="sTitle"><Data ss:Type="String">KAEL — ${escapeHtml(
@@ -446,7 +451,7 @@ export function exportToPdf<T>(payload: ExportDocumentPayload<T>): void {
     }
   }
 
-  if (pages.length > 40) {
+  if (pages.length > 15) {
     exportToCsv(payload);
     return;
   }
@@ -632,13 +637,7 @@ export function printDocumentIsolated<T>(payload: ExportDocumentPayload<T>): voi
   iframe.style.width = '0';
   iframe.style.height = '0';
   iframe.style.border = '0';
-  document.body.appendChild(iframe);
-
-  const doc = iframe.contentWindow?.document;
-  if (doc) {
-    doc.open();
-    doc.write(html);
-    doc.close();
+  iframe.onload = () => {
     setTimeout(() => {
       iframe.contentWindow?.focus();
       iframe.contentWindow?.print();
@@ -647,7 +646,9 @@ export function printDocumentIsolated<T>(payload: ExportDocumentPayload<T>): voi
           document.body.removeChild(iframe);
         }
       }, 2000);
-    }, 250);
-  }
+    }, 150);
+  };
+  iframe.srcdoc = html;
+  document.body.appendChild(iframe);
 }
 

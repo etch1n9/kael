@@ -80,7 +80,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
   );
 
   const moduleForTab: Record<typeof subTab, ModuleKey> = { ARUS_KAS: 'KEUANGAN_OWNER', CATATAN_TRANSAKSI: 'NERACA_GL', PIUTANG_KLAIM: 'KLAIM_BPJS_PIUTANG', JASA_MEDIS: 'JASA_MEDIS_REMUN' };
-  const allowedTabs = (Object.keys(moduleForTab) as Array<typeof subTab>).filter((tab) => (moduleForTab[tab] === initialView || (initialView === 'KEUANGAN_OWNER' && ['CATATAN_TRANSAKSI', 'JASA_MEDIS'].includes(tab))) && (workspace.user.role === 'SUPERUSER' || grantedModules.includes(moduleForTab[tab])));
+  const allowedTabs = (Object.keys(moduleForTab) as Array<typeof subTab>).filter((tab) => workspace.user.role === 'SUPERUSER' || grantedModules.includes(moduleForTab[tab]));
   useEffect(() => {
     if (!allowedTabs.includes(subTab) && allowedTabs[0]) setSubTab(allowedTabs[0]);
   }, [initialView, subTab, grantedModules.join(',')]);
@@ -108,8 +108,10 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
     () =>
       computeErpCompleteFinancialAnalysis({
         accountingEntries: rawEntries,
+        doubleEntryJournals: workspace.doubleEntryJournals || [],
         invoices: rawInvoices,
         medications: workspace.medications || [],
+        medicationMutations: workspace.medicationMutations || [],
         mutations: workspace.medicationMutations || [],
         purchaseOrders: workspace.purchaseOrders || [],
         visits: workspace.visits || [],
@@ -117,6 +119,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
       }),
     [
       rawEntries,
+      workspace.doubleEntryJournals,
       rawInvoices,
       workspace.medications,
       workspace.medicationMutations,
@@ -144,6 +147,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
       return true;
     });
   }, [rawEntries, typeFilter, categoryFilter, searchQuery]);
+  const entryPage = usePage(filteredEntries);
 
   const filteredClaims = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -241,6 +245,9 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
         amount: Number(jrnAmount),
       });
       setJrnDesc('');
+      setJrnAccountCode('');
+      setJrnAccountName('');
+      setJrnAmount('');
       setShowAddJournal(false);
       await onRefreshWorkspace();
       setFeedback({
@@ -755,7 +762,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredEntries.map((entry) => (
+                  entryPage.rows.map((entry) => (
                     <tr
                       key={entry.id}
                       className="hover:bg-[#F3F8F6] dark:hover:bg-[#0F2B25]"
@@ -798,6 +805,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
               </tbody>
             </table>
           </div>
+          {entryPage.bar}
         </div>
         </div>
       )}
@@ -919,8 +927,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  <>
-                  {claimPage.bar}{claimPage.rows.map((inv) => {
+                  claimPage.rows.map((inv) => {
                     const effectiveAmount = inv.claimRequestedAmount ?? Math.max(0, inv.subtotal - inv.discountAmount);
                     return (
                       <tr key={inv.id} className="hover:bg-[#F3F8F6] dark:hover:bg-[#0F2B25]">
@@ -977,12 +984,12 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
                         </td>
                       </tr>
                     );
-                  })}
-                  </>
+                  })
                 )}
               </tbody>
             </table>
           </div>
+          {claimPage.bar}
           </div>
         </div>
       )}

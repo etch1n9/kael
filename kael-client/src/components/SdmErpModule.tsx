@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { CalendarCheck, Clock, Wallet } from 'lucide-react';
 import { Facility, UserAccount } from '../domain/simrs.ts';
+import { formatRupiah, toLocalDateKey } from '../domain/clinicalLogic.ts';
 import { kaelApi, WorkspacePayload } from '../utils/apiClient.ts';
 
 interface SdmErpModuleProps {
@@ -31,7 +32,7 @@ export function SdmErpModule({
   );
   const [staffName, setStaffName] = useState(currentUser.fullName);
   const [note, setNote] = useState('');
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() => toLocalDateKey());
   const [amount, setAmount] = useState('');
   const [message, setMessage] = useState('');
 
@@ -85,11 +86,11 @@ export function SdmErpModule({
             role="tab"
             aria-selected={activeTab === key}
             aria-controls={`sdm-panel-${key}`}
-            onClick={() => setActiveTab(key)}
-            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold transition-colors ${
+            onClick={() => { setActiveTab(key); setMessage(''); }}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === key
                 ? 'bg-[#00897B] text-white'
-                : 'bg-white dark:bg-[#0B211D] border border-[#D5E3DF] dark:border-[#1E473F] text-[#0F2922] dark:text-white hover:bg-[#EBF4F1]'
+                : 'bg-white dark:bg-[#0B211D] border border-[#D5E3DF] dark:border-[#1E473F] text-[#0F2922] dark:text-white hover:bg-[#EBF4F1] dark:hover:bg-[#11302A]'
             }`}
           >
             <Icon className="h-3.5 w-3.5" />
@@ -108,7 +109,7 @@ export function SdmErpModule({
         {activeTab === 'CUTI' && <StaffForm title="Catat cuti atau izin" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount={false} onSubmit={save} message={message} />}
         {activeTab === 'PENGGAJIAN' && <StaffForm title="Catat komponen gaji" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount onSubmit={save} message={message} />}
         <ul className="space-y-1 text-xs text-[#52736B] dark:text-[#86B5A9]">
-          {(rows || []).slice(0, 20).map((row) => <li key={row.id}>{row.date || row.createdAt.slice(0, 10)} · {row.staffName}{row.note ? ` · ${row.note}` : ''}{row.amount ? ` · Rp ${row.amount}` : ''}</li>)}
+          {(rows || []).slice(0, 20).map((row) => <li key={row.id}>{row.date || row.createdAt.slice(0, 10)} · {row.staffName}{row.note ? ` · ${row.note}` : ''}{row.amount ? ` · ${formatRupiah(row.amount)}` : ''}</li>)}
           {(rows || []).length === 0 && <li>Belum ada catatan pada tab ini.</li>}
         </ul>
       </section>
@@ -134,13 +135,13 @@ function StaffForm(props: {
     <form onSubmit={props.onSubmit} className="space-y-2">
       <h2 className="text-sm font-bold text-[#0F2922] dark:text-white">{props.title}</h2>
       <div className="grid gap-2 sm:grid-cols-2">
-        <input required value={props.staffName} onChange={(event) => props.setStaffName(event.target.value)} placeholder="Nama pegawai" list="sdm-staff" className="rounded-lg border px-3 py-2 text-xs" />
-        <input type="date" required value={props.date} onChange={(event) => props.setDate(event.target.value)} className="rounded-lg border px-3 py-2 text-xs" />
-        <input value={props.note} onChange={(event) => props.setNote(event.target.value)} placeholder="Catatan" className="rounded-lg border px-3 py-2 text-xs sm:col-span-2" />
-        {props.showAmount && <input inputMode="numeric" value={props.amount} onChange={(event) => props.setAmount(event.target.value)} placeholder="Nominal rupiah" className="rounded-lg border px-3 py-2 text-xs" />}
+        <input required value={props.staffName} onChange={(event) => props.setStaffName(event.target.value)} placeholder="Nama pegawai" list="sdm-staff" className="rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714] text-[#0F2922] dark:text-white px-3 py-2 text-xs" />
+        <input type="date" required value={props.date} onChange={(event) => props.setDate(event.target.value)} className="rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714] text-[#0F2922] dark:text-white px-3 py-2 text-xs" />
+        <input value={props.note} onChange={(event) => props.setNote(event.target.value)} placeholder="Catatan" className="rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714] text-[#0F2922] dark:text-white px-3 py-2 text-xs sm:col-span-2" />
+        {props.showAmount && <input type="number" min={0} step="any" value={props.amount} onChange={(event) => props.setAmount(event.target.value)} placeholder="Nominal rupiah" className="rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714] text-[#0F2922] dark:text-white px-3 py-2 text-xs font-mono" />}
       </div>
-      <button type="submit" className="rounded-xl bg-[#00897B] px-4 py-2 text-xs font-semibold text-white">Simpan</button>
-      {props.message && <p className="text-xs">{props.message}</p>}
+      <button type="submit" className="rounded-xl bg-[#00897B] hover:bg-[#00796B] px-4 py-2 text-xs font-semibold text-white cursor-pointer">Simpan</button>
+      {props.message && <p className="text-xs text-[#00897B] dark:text-[#4DB6AC]">{props.message}</p>}
     </form>
   );
 }

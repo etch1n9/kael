@@ -281,13 +281,30 @@ fn cap_sessions(app: &mut App) {
     }
 }
 
+pub fn reload_state(app: &mut App) {
+    if let Ok(value) = app.store.reload() {
+        app.db = value;
+    }
+    if let Ok(rows) = app.store.load_sessions() {
+        let mut sessions = HashMap::new();
+        for (token, user_id, facility_code, expires_at) in rows {
+            sessions.insert(
+                token,
+                Session {
+                    user_id,
+                    facility_code,
+                    expires_at,
+                },
+            );
+        }
+        app.sessions = sessions;
+    }
+}
+
 pub fn save(app: &mut App) -> Result<(), ApiError> {
     cap_sessions(app);
     if let Err(message) = app.store.save(&app.db) {
-        let loaded = app.store.reload();
-        if let Ok(value) = loaded {
-            app.db = value;
-        }
+        reload_state(app);
         eprintln!("KAEL gagal menyimpan database: {message}");
         return Err(error(500, "Permintaan gagal disimpan server."));
     }
@@ -295,10 +312,7 @@ pub fn save(app: &mut App) -> Result<(), ApiError> {
         (token.clone(), (session.user_id.clone(), session.facility_code.clone(), session.expires_at))
     }).collect();
     if let Err(message) = app.store.save_sessions(&packed) {
-        let loaded = app.store.reload();
-        if let Ok(value) = loaded {
-            app.db = value;
-        }
+        reload_state(app);
         eprintln!("KAEL gagal menyimpan sesi: {message}");
         return Err(error(500, "Permintaan gagal disimpan server."));
     }
@@ -324,6 +338,7 @@ fn authorize(app: &mut App, headers: &HeaderMap, path: &str) -> Result<RequestCo
     let session = app.sessions.get(&token).cloned().ok_or(expired)?;
     if Utc::now().timestamp_millis() >= session.expires_at {
         app.sessions.remove(&token);
+        let _ = app.store.delete_session(&token);
         return Err(error(
             401,
             "Sesi tidak valid atau telah berakhir. Silakan login kembali.",
@@ -338,6 +353,8 @@ fn authorize(app: &mut App, headers: &HeaderMap, path: &str) -> Result<RequestCo
         })
         .cloned()
         .ok_or_else(|| {
+            app.sessions.remove(&token);
+            let _ = app.store.delete_session(&token);
             error(
                 401,
                 "Akun pengguna tidak aktif atau telah dicabut oleh Superuser.",
@@ -366,6 +383,7 @@ fn authorize(app: &mut App, headers: &HeaderMap, path: &str) -> Result<RequestCo
         .any(|entry| text(entry, "id") == role && entry["active"] == true)
     {
         app.sessions.remove(&token);
+        let _ = app.store.delete_session(&token);
         return Err(forbidden(
             "Peran akun dinonaktifkan atau tidak lagi tersedia. Hubungi Superuser.",
         ));
@@ -420,13 +438,19 @@ fn login_prepare(app: &mut App, body: &Value, ip: &str) -> Result<LoginPrep, Api
         return Err(bad_request("Username dan kata sandi wajib diisi."));
     }
     let key = format!("{ip}|{username}");
+    let user_key = format!("user|{username}");
     let now_ms = Utc::now().timestamp_millis();
-    if let Some(attempt) = app.login_failures.get(&key) {
-        if attempt.locked_until > now_ms {
-            return Err(error(
-                429,
-                "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.",
-            ));
+    app.login_failures.retain(|_, v| {
+        v.locked_until > now_ms || now_ms - v.window_start <= 5 * 60 * 1000
+    });
+    for k in [&key, &user_key] {
+        if let Some(attempt) = app.login_failures.get(k) {
+            if attempt.locked_until > now_ms {
+                return Err(error(
+                    429,
+                    "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.",
+                ));
+            }
         }
     }
     let found = array(&app.db, "users").iter().position(|user| {
@@ -447,20 +471,30 @@ fn login_prepare(app: &mut App, body: &Value, ip: &str) -> Result<LoginPrep, Api
 
 fn note_login_failure(app: &mut App, key: &str) {
     let now_ms = Utc::now().timestamp_millis();
-    let attempt = app.login_failures.entry(key.to_owned()).or_insert(LoginAttempt {
-        count: 0,
-        window_start: now_ms,
-        locked_until: 0,
-    });
-    if now_ms - attempt.window_start > 5 * 60 * 1000 {
-        attempt.count = 0;
-        attempt.window_start = now_ms;
+    if app.login_failures.len() >= 4096 {
+        app.login_failures.retain(|_, v| v.locked_until > now_ms);
+        if app.login_failures.len() >= 4096 {
+            return;
+        }
     }
-    attempt.count += 1;
-    if attempt.count >= 5 {
-        attempt.locked_until = now_ms + 15 * 60 * 1000;
-        attempt.count = 0;
-        attempt.window_start = now_ms;
+    let username = key.split('|').nth(1).unwrap_or("");
+    let user_key = format!("user|{username}");
+    for (target, limit) in [(key.to_owned(), 5u8), (user_key, 8u8)] {
+        let attempt = app.login_failures.entry(target).or_insert(LoginAttempt {
+            count: 0,
+            window_start: now_ms,
+            locked_until: 0,
+        });
+        if now_ms - attempt.window_start > 5 * 60 * 1000 {
+            attempt.count = 0;
+            attempt.window_start = now_ms;
+        }
+        attempt.count += 1;
+        if attempt.count >= limit {
+            attempt.locked_until = now_ms + 15 * 60 * 1000;
+            attempt.count = 0;
+            attempt.window_start = now_ms;
+        }
     }
 }
 
@@ -469,8 +503,9 @@ fn login_commit(app: &mut App, body: &Value, prep: &LoginPrep, password_ok: bool
         note_login_failure(app, &prep.key);
         return Err(login_denied());
     }
-    app.login_failures.remove(&prep.key);
     let username = prep.key.split('|').nth(1).unwrap_or("");
+    app.login_failures.remove(&prep.key);
+    app.login_failures.remove(&format!("user|{username}"));
     let index = array(&app.db, "users")
         .iter()
         .position(|user| {
@@ -559,15 +594,20 @@ fn login_denied() -> ApiError {
     )
 }
 
+fn decode_query(raw: &str) -> String {
+    let replaced = raw.replace('+', " ");
+    decode_path(&replaced).unwrap_or(replaced)
+}
+
 fn query_window(query: &str) -> (usize, String, String) {
     let mut limit = 500usize;
     let mut from = String::new();
     let mut to = String::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let mut parts = pair.splitn(2, '=');
-        let key = parts.next().unwrap_or("");
-        let value = parts.next().unwrap_or("").trim().to_owned();
-        match key {
+        let key = decode_query(parts.next().unwrap_or("")).trim().to_owned();
+        let value = decode_query(parts.next().unwrap_or("")).trim().to_owned();
+        match key.as_str() {
             "limit" => limit = value.parse::<usize>().unwrap_or(500).clamp(1, 500),
             "from" => from = value,
             "to" => to = value,
@@ -578,9 +618,15 @@ fn query_window(query: &str) -> (usize, String, String) {
 }
 
 fn in_window(entry: &Value, from: &str, to: &str) -> bool {
-    let stamp = if text(entry, "createdAt").is_empty() { text(entry, "timestamp") } else { text(entry, "createdAt") };
-    (from.is_empty() || stamp >= from || stamp.starts_with(from))
-        && (to.is_empty() || stamp <= to || stamp.starts_with(to))
+    if from.is_empty() && to.is_empty() {
+        return true;
+    }
+    let stamp = crate::storage::created_of(entry);
+    if stamp.is_empty() {
+        return true;
+    }
+    (from.is_empty() || stamp.as_str() >= from || stamp.starts_with(from))
+        && (to.is_empty() || stamp.as_str() <= to || stamp.starts_with(to))
 }
 
 fn present(mut rows: Vec<Value>, limit: usize) -> Vec<Value> {
@@ -690,6 +736,7 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
             "bridgingLogs" => has_any(&["BRIDGING_SATUSEHAT"]),
             "evidenceRegistry" => superuser || has_any(&["LAPORAN_REGULASI"]),
             "facilityConfigs" => superuser,
+            "attendance" | "leaveRequests" | "payrollRuns" => staff_access,
             _ => false,
         }
     };
@@ -717,10 +764,15 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
     }
     let facility_history = if !superuser {
         Vec::new()
-    } else if code.is_empty() {
-        array(&app.db, "facilityConfigs").clone()
     } else {
-        scoped("facilityConfigs")
+        present(
+            array(&app.db, "facilityConfigs")
+                .iter()
+                .filter(|entry| in_window(entry, from, to))
+                .cloned()
+                .collect(),
+            limit,
+        )
     };
     let mut result = json!({"user":sanitize_user(&app.db,user,code),"roles":app.db["roles"],"activeFacility":facility,
         "facilityConfigHistory":facility_history,"evidenceRegistry":scoped("evidenceRegistry"),
@@ -753,6 +805,9 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
         "doubleEntryJournals",
         "bridgingLogs",
         "evidenceRegistry",
+        "attendance",
+        "leaveRequests",
+        "payrollRuns",
     ] {
         data_access.insert(
             key.into(),
@@ -789,7 +844,7 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
         }
     }
     for key in ["attendance", "leaveRequests", "payrollRuns"] {
-        result[key] = json!(present(array(&app.db, key).iter().filter(|entry| (code.is_empty() || text(entry, "facilityCode") == code) && in_window(entry, from, to)).cloned().collect(), limit));
+        result[key] = json!(scoped(key));
     }
     result
 }
@@ -853,10 +908,10 @@ fn dispatch(
             &code,
             "Beralih fasilitas aktif.",
         );
-        save(app)?;
         if let Some(session) = app.sessions.get_mut(&context.token) {
-            session.facility_code = code;
+            session.facility_code = code.clone();
         }
+        save(app)?;
         let accessible: Vec<Value> = array(&app.db, "facilities")
             .iter()
             .filter(|entry| {
@@ -974,10 +1029,7 @@ pub async fn serve(State(state): State<Arc<Shared>>, request: Request) -> Respon
         let method = if parts.method == "HEAD" { "GET" } else { parts.method.as_str() };
         let result = dispatch(&mut app, method, &path, parts.uri.query().unwrap_or(""), &parts.headers, &body);
         if result.is_err() {
-            let loaded = app.store.reload();
-        if let Ok(value) = loaded {
-            app.db = value;
-        }
+            reload_state(&mut app);
         }
         result
     });

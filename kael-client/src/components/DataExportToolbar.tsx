@@ -54,9 +54,17 @@ export function DataExportToolbar<T = Record<string, unknown>>({
     rows,
   };
 
+  const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
   const triggerNotice = (msg: string) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
     setFeedbackToast(msg);
-    setTimeout(() => setFeedbackToast(null), 3200);
+    timerRef.current = setTimeout(() => setFeedbackToast(null), 3200);
   };
 
   const handleDownloadPdf = () => {

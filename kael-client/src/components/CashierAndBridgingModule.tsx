@@ -44,9 +44,13 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
   );
   const grantedModules = workspace.user.resolvedModules || workspace.user.customPrivileges || [];
   const hasModule = (key: 'KASIR_AKUNTANSI' | 'BRIDGING_SATUSEHAT' | 'LAPORAN_REGULASI') => workspace.user.role === 'SUPERUSER' || grantedModules.includes(key);
-  const allowedTabs = initialView === 'KASIR_AKUNTANSI' && hasModule(initialView)
-    ? ['KASIR', 'AKUNTANSI'] : initialView === 'BRIDGING_SATUSEHAT' && hasModule(initialView)
-    ? ['BRIDGING'] : initialView === 'LAPORAN_REGULASI' && hasModule(initialView) ? ['REGULASI'] : [];
+  const tabModuleMap: Record<'KASIR' | 'AKUNTANSI' | 'BRIDGING' | 'REGULASI', 'KASIR_AKUNTANSI' | 'BRIDGING_SATUSEHAT' | 'LAPORAN_REGULASI'> = {
+    KASIR: 'KASIR_AKUNTANSI',
+    AKUNTANSI: 'KASIR_AKUNTANSI',
+    BRIDGING: 'BRIDGING_SATUSEHAT',
+    REGULASI: 'LAPORAN_REGULASI',
+  };
+  const allowedTabs = (['KASIR', 'AKUNTANSI', 'BRIDGING', 'REGULASI'] as const).filter((tab) => hasModule(tabModuleMap[tab]));
   useEffect(() => {
     if (!allowedTabs.includes(activeTab) && allowedTabs[0]) setActiveTab(allowedTabs[0] as typeof activeTab);
   }, [initialView, activeTab, grantedModules.join(',')]);
@@ -67,12 +71,40 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
 
   // Add Custom Billing Line Item State
   const [showAddBillItem, setShowAddBillItem] = useState(false);
-  const [billCategory, setBillCategory] = useState<
-    'PENDAFTARAN' | 'KONSULTASI' | 'TINDAKAN' | 'FARMASI' | 'LABORATORIUM' | 'KAMAR_INAP'
-  >('TINDAKAN');
+  const [billCategory, setBillCategory] = useState<BillingLineItem['category']>('TINDAKAN');
   const [billDesc, setBillDesc] = useState('');
   const [billQty, setBillQty] = useState(1);
   const [billPrice, setBillPrice] = useState<number | ''>('');
+
+  useEffect(() => {
+    if (!selectedInvoice) {
+      if (workspace.invoices[0]) {
+        setSelectedInvoice(workspace.invoices[0]);
+        setDiscountAmount(workspace.invoices[0].discountAmount);
+      }
+      return;
+    }
+    const updated = workspace.invoices.find((inv) => inv.id === selectedInvoice.id);
+    if (updated && updated !== selectedInvoice) {
+      setSelectedInvoice(updated);
+      setDiscountAmount(updated.discountAmount);
+    } else if (!updated) {
+      setSelectedInvoice(workspace.invoices[0] || null);
+    }
+  }, [workspace.invoices]);
+
+  useEffect(() => {
+    if (!selectedBridgingLog) {
+      if (workspace.bridgingLogs[0]) setSelectedBridgingLog(workspace.bridgingLogs[0]);
+      return;
+    }
+    const updated = workspace.bridgingLogs.find((log) => log.id === selectedBridgingLog.id);
+    if (updated && updated !== selectedBridgingLog) {
+      setSelectedBridgingLog(updated);
+    } else if (!updated) {
+      setSelectedBridgingLog(workspace.bridgingLogs[0] || null);
+    }
+  }, [workspace.bridgingLogs]);
 
   // Manual Accounting Entry State
   const [showAddJournal, setShowAddJournal] = useState(false);
@@ -176,6 +208,8 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
       });
       setSelectedInvoice(updated);
       setBillDesc('');
+      setBillQty(1);
+      setBillPrice('');
       setShowAddBillItem(false);
       await onRefreshWorkspace();
       setFeedback({
@@ -204,6 +238,9 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
         amount: Number(jrnAmount),
       });
       setJrnDesc('');
+      setJrnAccountCode('');
+      setJrnAccountName('');
+      setJrnAmount('');
       setShowAddJournal(false);
       await onRefreshWorkspace();
       setFeedback({
@@ -218,39 +255,6 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
         text: err instanceof Error ? err.message : 'Gagal mencatat jurnal akuntansi.',
       });
     }
-  };
-
-  const handleExportAccountingCsv = () => {
-    const headers = [
-      'No Jurnal',
-      'Waktu',
-      'Kode Akun',
-      'Nama Akun',
-      'Tipe',
-      'Kategori',
-      'Deskripsi',
-      'Nominal IDR',
-    ];
-    const rows = workspace.accountingEntries.map((acc) => [
-      acc.entryNumber,
-      acc.timestamp,
-      acc.accountCode,
-      acc.accountName,
-      acc.type,
-      acc.category,
-      `"${acc.description.replace(/"/g, '""')}"`,
-      acc.amount,
-    ]);
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `jurnal-akuntansi-${facilityCode.toLowerCase()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   };
 
   const handleTriggerBridging = async (
@@ -637,7 +641,10 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
                         <option value="KONSULTASI">KONSULTASI</option>
                         <option value="FARMASI">FARMASI / ALKES</option>
                         <option value="LABORATORIUM">LABORATORIUM</option>
+                        <option value="RADIOLOGI">RADIOLOGI</option>
                         <option value="KAMAR_INAP">KAMAR INAP</option>
+                        <option value="BEDAH_IBS">BEDAH / IBS</option>
+                        <option value="MCU">MEDICAL CHECK-UP</option>
                         <option value="PENDAFTARAN">ADMINISTRASI / PENDAFTARAN</option>
                       </select>
                     </div>

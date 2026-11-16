@@ -178,7 +178,7 @@ pub fn invoice_totals(items: &[Value], bpjs: bool, discount: f64) -> Value {
     );
     let discount = rupiah(discount.min(subtotal).max(0.0));
     let net = rupiah(subtotal - discount);
-    json!({"subtotal":subtotal,"discountAmount":discount,"bpjsCoveredAmount":0,"claimRequestedAmount":if bpjs {net} else {0.0},
+    json!({"subtotal":subtotal,"discountAmount":discount,"bpjsCoveredAmount":if bpjs {net} else {0.0},"claimRequestedAmount":if bpjs {net} else {0.0},
         "patientPayableAmount":if bpjs {0.0} else {net}})
 }
 
@@ -213,11 +213,16 @@ pub fn fefo(batches: &[Value], quantity: f64) -> Result<(Vec<Value>, Vec<Value>)
     if quantity <= 0.0 {
         return Ok((updated, allocations));
     }
+    let today = Utc::now().format("%Y-%m-%d").to_string();
     updated.sort_by(|left, right| text(left, "expiryDate").cmp(text(right, "expiryDate")));
     let mut remaining = quantity;
     for batch in &mut updated {
         if remaining <= 0.0 {
             break;
+        }
+        let expiry = text(batch, "expiryDate");
+        if !expiry.is_empty() && expiry < today.as_str() {
+            continue;
         }
         let stock = number(batch, "stock");
         if stock <= 0.0 {
@@ -276,8 +281,11 @@ pub fn apply_clinical_record(
         .map(|(signed, now)| (now - signed).num_seconds() as f64 / 3600.0)
         .unwrap_or(f64::INFINITY);
     let summary = |record: &Value| {
+        let rx_count = list(&record["plan"], "prescriptions").len();
+        let proc_count = list(&record["plan"], "procedures").len();
         format!(
-            "{} - {} ({})",
+            "[{}] {} - {} ({}; Resep: {rx_count}, Tindakan: {proc_count})",
+            text(&record["subjective"], "chiefComplaint"),
             text(&record["assessment"], "primaryIcd10Code"),
             text(&record["assessment"], "primaryIcd10Name"),
             text(&record["plan"], "therapyNotes")

@@ -146,6 +146,17 @@ export function evaluateLabFlag(
 }
 
 
+export function toLocalDateKey(date: Date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function roundQty(val: number): number {
+  return Number.isFinite(val) ? Math.round(val * 1000) / 1000 : 0;
+}
+
 export function allocateFEFOStock(
   batches: MedicationBatch[],
   requestedQty: number
@@ -158,19 +169,21 @@ export function allocateFEFOStock(
   if (requestedQty <= 0) {
     return { success: true, allocations: [], updatedBatches: [...batches], shortfall: 0 };
   }
+  const today = toLocalDateKey();
   const sorted = [...batches]
     .map((b) => ({ ...b }))
     .sort((a, b) => a.expiryDate.localeCompare(b.expiryDate));
 
-  let remaining = requestedQty;
+  let remaining = roundQty(requestedQty);
   const allocations: { batchNumber: string; quantity: number }[] = [];
 
   for (const batch of sorted) {
     if (remaining <= 0) break;
+    if (batch.expiryDate && batch.expiryDate < today) continue;
     if (batch.stock <= 0) continue;
-    const take = Math.min(batch.stock, remaining);
-    batch.stock -= take;
-    remaining -= take;
+    const take = roundQty(Math.min(batch.stock, remaining));
+    batch.stock = roundQty(batch.stock - take);
+    remaining = roundQty(remaining - take);
     allocations.push({ batchNumber: batch.batchNumber, quantity: take });
   }
 
@@ -196,20 +209,32 @@ export function checkClinicalSafetyAlerts(
   const drugInteractions: string[] = [];
   const stockShortfalls: string[] = [];
 
+  const today = toLocalDateKey();
   const normalizedAllergies = patientAllergies.map((a) => a.toLowerCase().trim());
   const selectedMeds: MedicationInventory[] = [];
+  const requestedByMedId = new Map<string, number>();
 
   for (const item of prescriptions) {
     const med = inventoryList.find(
       (m) => m.id === item.medicationId || m.code === item.medicationCode
     );
     if (!med) continue;
-    selectedMeds.push(med);
+    requestedByMedId.set(med.id, roundQty((requestedByMedId.get(med.id) || 0) + (item.quantity || 0)));
+    if (!selectedMeds.some((m) => m.id === med.id)) {
+      selectedMeds.push(med);
+    }
+  }
 
-    const totalStock = med.batches.reduce((sum, b) => sum + b.stock, 0);
-    if (item.quantity > totalStock) {
+  for (const med of selectedMeds) {
+    const requestedQty = requestedByMedId.get(med.id) || 0;
+    const totalStock = roundQty(
+      med.batches
+        .filter((b) => !b.expiryDate || b.expiryDate >= today)
+        .reduce((sum, b) => sum + b.stock, 0)
+    );
+    if (requestedQty > totalStock) {
       stockShortfalls.push(
-        `${med.name}: diminta ${item.quantity} ${med.unit}, stok tersedia ${totalStock} ${med.unit}`
+        `${med.name}: diminta ${requestedQty} ${med.unit}, stok aktif tersedia ${totalStock} ${med.unit}`
       );
     }
 
@@ -745,7 +770,7 @@ export function buildCashflowTimeSeries(
 
   for (const entry of accountingEntries) {
     if (!entry.timestamp || !Number.isFinite(Date.parse(entry.timestamp))) continue;
-    const dateKey = new Date(entry.timestamp).toISOString().slice(0, 10);
+    const dateKey = toLocalDateKey(new Date(entry.timestamp));
     const prev = byDate.get(dateKey) || { inflow: 0, outflow: 0 };
     if (entry.type === 'PENDAPATAN') {
       prev.inflow += entry.amount;
@@ -755,13 +780,13 @@ export function buildCashflowTimeSeries(
     byDate.set(dateKey, prev);
   }
 
-  const anchorStr = new Date().toISOString().slice(0, 10);
-  const anchorDate = new Date(`${anchorStr}T00:00:00.000Z`);
+  const now = new Date();
+  const anchorDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
   const points: CashflowChartPoint[] = [];
   for (let i = daysCount - 1; i >= 0; i--) {
-    const d = new Date(anchorDate.getTime() - i * 24 * 60 * 60 * 1000);
-    const dateKey = d.toISOString().slice(0, 10);
+    const d = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate() - i);
+    const dateKey = toLocalDateKey(d);
     const label = dateKey.slice(5); // MM-DD
     const bucket = byDate.get(dateKey) || { inflow: 0, outflow: 0 };
     const netVal = bucket.inflow - bucket.outflow;

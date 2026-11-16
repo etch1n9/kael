@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Users,
   Search,
@@ -278,6 +278,22 @@ export function AllPatientsModule({
     visitStartDate,
     visitEndDate,
     todayDate,
+  ]);
+
+  useEffect(() => {
+    setPatientPage(0);
+  }, [
+    searchQuery,
+    genderFilter,
+    clinicalFlagFilter,
+    guarantorFilter,
+    polyFilter,
+    regFilter,
+    regStartDate,
+    regEndDate,
+    visitFilter,
+    visitStartDate,
+    visitEndDate,
   ]);
 
   const exportColumns: ExportColumn<Patient>[] = useMemo(
@@ -1019,8 +1035,8 @@ export function AllPatientsModule({
             Menampilkan {Math.min(filteredPatients.length, patientPage * 50 + 1)}–{Math.min(filteredPatients.length, patientPage * 50 + 50)} dari <strong>{filteredPatients.length}</strong>
           </span>
           <span className="inline-flex gap-2">
-            <button type="button" disabled={patientPage === 0} onClick={() => setPatientPage((page) => Math.max(0, page - 1))} className="rounded border px-2 py-1 disabled:opacity-40">Sebelumnya</button>
-            <button type="button" disabled={(patientPage + 1) * 50 >= filteredPatients.length} onClick={() => setPatientPage((page) => page + 1)} className="rounded border px-2 py-1 disabled:opacity-40">Berikutnya</button>
+            <button type="button" disabled={patientPage === 0} onClick={() => setPatientPage((page) => Math.max(0, page - 1))} className="rounded border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0D2823] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#EBF4F1] dark:hover:bg-[#163F35] px-2 py-1 disabled:opacity-40 cursor-pointer">Sebelumnya</button>
+            <button type="button" disabled={(patientPage + 1) * 50 >= filteredPatients.length} onClick={() => setPatientPage((page) => page + 1)} className="rounded border border-[#D5E3DF] dark:border-[#1E473F] bg-white dark:bg-[#0D2823] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#EBF4F1] dark:hover:bg-[#163F35] px-2 py-1 disabled:opacity-40 cursor-pointer">Berikutnya</button>
           </span>
         </div>
       </div>
@@ -1131,6 +1147,11 @@ export function AllPatientsModule({
             </div>
 
             <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5 grid [&>*]:min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,var(--kael-field-min-inline-size)),1fr))] gap-3 text-xs">
+              {feedback?.type === 'error' && (
+                <div role="alert" className="col-span-full rounded-xl border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/50 p-3 text-red-700 dark:text-red-300">
+                  {feedback.message}
+                </div>
+              )}
               <div>
                 <label className="block font-semibold mb-1">Nama Lengkap Pasien *</label>
                 <input
@@ -1303,11 +1324,17 @@ export function AllPatientsModule({
                   className="w-full px-3 py-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
                 >
                   <option value="" disabled>Pilih tenaga medis</option>
-                  {doctors.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.fullName} ({d.specialization || d.roleName || d.role})
-                    </option>
-                  ))}
+                  {doctors
+                    .filter((d) => {
+                      if (!queuePoly) return true;
+                      const assigned = d.polyclinics?.length ? d.polyclinics : d.polyclinic ? [d.polyclinic] : [];
+                      return assigned.length === 0 || assigned.includes(queuePoly);
+                    })
+                    .map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.fullName} ({d.specialization || d.roleName || d.role})
+                      </option>
+                    ))}
                 </select>
                 {doctors.length === 0 && <p className="mt-1 text-[#52736B]">Belum ada tenaga medis yang terdaftar untuk fasilitas ini.</p>}
               </div>
