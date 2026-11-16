@@ -631,6 +631,7 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
         }
     }
     if status == "BATAL" {
+        let mut cancelled_invoices = Vec::new();
         for key in ["invoices", "pharmacyOrders", "labOrders", "radiologyOrders"] {
             for row in array_mut(&mut app.db, key) {
                 if text(row, "visitId") != visit_id || text(row, "facilityCode") != ctx.facility_code {
@@ -645,8 +646,14 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
                 }
                 if !matches!(current, "BATAL" | "LUNAS" | "KLAIM_DISETUJUI" | "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED") {
                     row["status"] = json!("BATAL");
+                    if key == "invoices" {
+                        cancelled_invoices.push(row.clone());
+                    }
                 }
             }
+        }
+        for inv in &cancelled_invoices {
+            crate::finance::reverse_open_claim_receivable(app, ctx, inv, "Pembatalan kunjungan");
         }
         let mut released_beds = Vec::new();
         for bed in array_mut(&mut app.db, "beds") {

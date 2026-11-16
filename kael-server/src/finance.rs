@@ -72,6 +72,44 @@ fn balanced_journal(app: &mut App, ctx: &RequestContext, description: &str, refe
     balanced_journal_with_event(app, ctx, "INVENTORY", description, reference, debit_code, debit_name, credit_code, credit_name, amount);
 }
 
+pub fn reverse_open_claim_receivable(
+    app: &mut App,
+    ctx: &RequestContext,
+    invoice: &Value,
+    reason: &str,
+) {
+    let inv_num = text(invoice, "invoiceNumber");
+    if inv_num.is_empty() {
+        return;
+    }
+    let mut open_receivable = 0.0_f64;
+    for j in array(&app.db, "doubleEntryJournals") {
+        if text(j, "facilityCode") != ctx.facility_code || text(j, "sourceTransactionId") != inv_num {
+            continue;
+        }
+        for line in array(j, "lines") {
+            if text(line, "accountCode") == "1-1200" {
+                open_receivable += number(line, "debit") - number(line, "credit");
+            }
+        }
+    }
+    let open_receivable = open_receivable.round();
+    if open_receivable > 0.0 {
+        balanced_journal_with_event(
+            app,
+            ctx,
+            "CLAIM_REVERSED",
+            &format!("Pembalikan pengakuan piutang {} — {} ({reason})", inv_num, text(invoice, "patientName")),
+            inv_num,
+            "4-1015",
+            "Pencairan Klaim JKN BPJS / Piutang Korporasi",
+            "1-1200",
+            "Piutang Klaim JKN / Asuransi",
+            open_receivable,
+        );
+    }
+}
+
 fn balanced_journal_with_event(
     app: &mut App,
     ctx: &RequestContext,
@@ -848,7 +886,8 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             && text(j, "sourceTransactionId") == inv_num
             && text(j, "eventType") == "CLAIM_RECOGNIZED"
     });
-    if !has_recognized && net > 0.0 {
+    let unrecognized_balance = (net - prev_received).max(0.0).round();
+    if !has_recognized && unrecognized_balance > 0.0 {
         balanced_journal_with_event(
             app,
             ctx,
@@ -859,7 +898,7 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             "Piutang Klaim JKN / Asuransi",
             "4-1015",
             "Pencairan Klaim JKN BPJS / Piutang Korporasi",
-            net,
+            unrecognized_balance,
         );
     }
     array_mut(&mut app.db, "accountingEntries").push(entry.clone());
@@ -1048,7 +1087,8 @@ fn resolve_cancelled_invoice(
                         && text(j, "sourceTransactionId") == inv_num
                         && text(j, "eventType") == "CLAIM_RECOGNIZED"
                 });
-                if !has_recognized && net > 0.0 {
+                let unrecognized_balance = (net - prev_received).max(0.0).round();
+                if !has_recognized && unrecognized_balance > 0.0 {
                     balanced_journal_with_event(
                         app,
                         ctx,
@@ -1059,7 +1099,7 @@ fn resolve_cancelled_invoice(
                         "Piutang Klaim JKN / Asuransi",
                         "4-1015",
                         "Pencairan Klaim JKN BPJS / Piutang Korporasi",
-                        net,
+                        unrecognized_balance,
                     );
                 }
                 let desc = format!(
@@ -1150,6 +1190,9 @@ fn resolve_cancelled_invoice(
                 "Kas dan setara kas",
                 refund_amount,
             );
+            if remaining_received == 0.0 {
+                reverse_open_claim_receivable(app, ctx, &invoice, &reason);
+            }
         }
         _ => return Err(bad_request("Aksi resolusi pembatalan tidak valid.")),
     }
@@ -1329,6 +1372,88 @@ mod tests {
             .count();
         assert_eq!(refund_journals, 1);
         assert_eq!(account_balance(&app, "1-1100"), 40000.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cancelled_unpaid_claim_reverses_receivable_gl_to_zero() {
+        let (mut app, ctx, root) = test_app();
+        array_mut(&mut app.db, "invoices")[0]["subtotal"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["bpjsCoveredAmount"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["items"][0]["unitPrice"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["items"][0]["subtotal"] = json!(150000);
+
+        pay(&mut app, &ctx, "inv-1", &json!({ "paymentMethod": "KLAIM_BPJS" })).unwrap();
+        assert_eq!(account_balance(&app, "1-1200"), 150000.0);
+
+        // Cancel invoice before any payment
+        let inv = array(&app.db, "invoices")[0].clone();
+        array_mut(&mut app.db, "invoices")[0]["status"] = json!("BATAL");
+        reverse_open_claim_receivable(&mut app, &ctx, &inv, "Pembatalan kunjungan");
+
+        assert_eq!(account_balance(&app, "1-1200"), 0.0);
+        assert_eq!(account_balance(&app, "4-1015"), 0.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn full_refund_on_cancelled_claim_zeros_cash_and_receivable_gl() {
+        let (mut app, ctx, root) = test_app();
+        pay(&mut app, &ctx, "inv-1", &json!({ "paymentMethod": "KLAIM_BPJS" })).unwrap();
+        reconcile(
+            &mut app,
+            &ctx,
+            &json!({ "invoiceId": "inv-1", "receivedAmount": 30000, "paymentReference": "REF-P1" }),
+        )
+        .unwrap();
+        assert_eq!(account_balance(&app, "1-1100"), 30000.0);
+        assert_eq!(account_balance(&app, "1-1200"), 70000.0);
+
+        array_mut(&mut app.db, "visits")[0]["status"] = json!("BATAL");
+        array_mut(&mut app.db, "invoices")[0]["cancellationResolutionStatus"] = json!("NEEDS_RESOLUTION");
+
+        let res = resolve_cancelled_invoice(&mut app, &ctx, "inv-1", &json!({
+            "action": "REFUND",
+            "reason": "Refund penuh",
+            "paymentReference": "RF-FULL",
+            "refundAmount": 30000
+        }))
+        .unwrap();
+        assert_eq!(res.body.as_ref().unwrap()["status"], json!("BATAL"));
+        assert_eq!(account_balance(&app, "1-1100"), 0.0);
+        assert_eq!(account_balance(&app, "1-1200"), 0.0);
+        assert_eq!(account_balance(&app, "4-1015"), 0.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_claim_finalization_recognizes_only_unreceived_balance() {
+        let (mut app, ctx, root) = test_app();
+        // Legacy KLAIM_DIAJUKAN of 150.000 with 30.000 already received before upgrade (no CLAIM_RECOGNIZED in GL)
+        array_mut(&mut app.db, "invoices")[0]["subtotal"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["bpjsCoveredAmount"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["claimRequestedAmount"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["totalReceivedAmount"] = json!(30000);
+        array_mut(&mut app.db, "invoices")[0]["status"] = json!("KLAIM_DIAJUKAN");
+        array_mut(&mut app.db, "invoices")[0]["paymentMethod"] = json!("KLAIM_BPJS");
+
+        reconcile(
+            &mut app,
+            &ctx,
+            &json!({
+                "invoiceId": "inv-1",
+                "receivedAmount": 20000,
+                "paymentReference": "REF-LEGACY-FINAL",
+                "final": true
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(app.db["invoices"][0]["status"], json!("LUNAS"));
+        assert_eq!(account_balance(&app, "1-1100"), 20000.0);
+        assert_eq!(account_balance(&app, "1-1200"), 0.0);
+        assert_eq!(account_balance(&app, "5-1900"), 100000.0);
+        assert_eq!(account_balance(&app, "4-1015"), -120000.0);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
