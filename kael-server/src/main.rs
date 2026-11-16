@@ -51,12 +51,13 @@ async fn run() -> Result<(), String> {
         sessions.insert(token, http::Session { user_id, facility_code, expires_at });
     }
     let shared_config = config.clone();
+    let sessions_digest = http::sessions_digest(&sessions);
     let app = http::App {
         config,
         store,
         db,
         sessions,
-        sessions_digest: 0,
+        sessions_digest,
         login_failures: HashMap::new(),
     };
     let router = axum::Router::new()

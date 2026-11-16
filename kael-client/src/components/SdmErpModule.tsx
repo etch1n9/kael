@@ -34,6 +34,7 @@ export function SdmErpModule({
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [amount, setAmount] = useState('');
   const [leaveStatus, setLeaveStatus] = useState<'PENDING' | 'APPROVED' | 'REJECTED'>('PENDING');
+  const [payrollStatus, setPayrollStatus] = useState<'PENDING' | 'APPROVED'>('PENDING');
   const [message, setMessage] = useState('');
 
   const tabs: { key: SdmTab; label: string; icon: typeof Clock }[] = [
@@ -53,7 +54,7 @@ export function SdmErpModule({
         note: note.trim(),
         date,
         amount: Number(amount || 0),
-        status: kind === 'leave' ? leaveStatus : undefined,
+        status: kind === 'leave' ? leaveStatus : kind === 'payroll' ? payrollStatus : undefined,
       });
       setNote('');
       setAmount('');
@@ -108,7 +109,7 @@ export function SdmErpModule({
       >
         {activeTab === 'ABSENSI' && <StaffForm title="Catat kehadiran" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount={false} onSubmit={save} message={message} />}
         {activeTab === 'CUTI' && <StaffForm title="Catat cuti atau izin" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount={false} leaveStatus={leaveStatus} setLeaveStatus={setLeaveStatus} onSubmit={save} message={message} />}
-        {activeTab === 'PENGGAJIAN' && <StaffForm title="Catat komponen gaji" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount onSubmit={save} message={message} />}
+        {activeTab === 'PENGGAJIAN' && <StaffForm title="Catat komponen gaji" staffName={staffName} setStaffName={setStaffName} note={note} setNote={setNote} date={date} setDate={setDate} amount={amount} setAmount={setAmount} showAmount payrollStatus={payrollStatus} setPayrollStatus={setPayrollStatus} onSubmit={save} message={message} />}
         <ul className="space-y-1 text-xs text-[#52736B] dark:text-[#86B5A9]">
           {(rows || []).slice(0, 20).map((row) => <li key={row.id}>{row.date || row.createdAt.slice(0, 10)} · {row.staffName}{row.note ? ` · ${row.note}` : ''}{row.amount ? ` · Rp ${row.amount}` : ''}</li>)}
           {(rows || []).length === 0 && <li>Belum ada catatan pada tab ini.</li>}
@@ -131,6 +132,8 @@ function StaffForm(props: {
   showAmount: boolean;
   leaveStatus?: 'PENDING' | 'APPROVED' | 'REJECTED';
   setLeaveStatus?: (value: 'PENDING' | 'APPROVED' | 'REJECTED') => void;
+  payrollStatus?: 'PENDING' | 'APPROVED';
+  setPayrollStatus?: (value: 'PENDING' | 'APPROVED') => void;
   onSubmit: (event: React.FormEvent) => void;
   message: string;
 }) {
@@ -142,6 +145,12 @@ function StaffForm(props: {
         <input type="date" required value={props.date} onChange={(event) => props.setDate(event.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
         <input value={props.note} onChange={(event) => props.setNote(event.target.value)} placeholder="Catatan" className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs sm:col-span-2 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
         {props.showAmount && <input inputMode="numeric" value={props.amount} onChange={(event) => props.setAmount(event.target.value)} placeholder="Nominal rupiah" className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />}
+        {props.payrollStatus && props.setPayrollStatus && (
+          <select value={props.payrollStatus} onChange={(event) => props.setPayrollStatus?.(event.target.value as 'PENDING' | 'APPROVED')} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+            <option value="PENDING">Draft / Menunggu</option>
+            <option value="APPROVED">Disetujui &amp; Posting Jurnal</option>
+          </select>
+        )}
         {props.leaveStatus && props.setLeaveStatus && (
           <select value={props.leaveStatus} onChange={(event) => props.setLeaveStatus?.(event.target.value as 'PENDING' | 'APPROVED' | 'REJECTED')} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
             <option value="PENDING">Menunggu</option>

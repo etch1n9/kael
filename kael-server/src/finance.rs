@@ -257,6 +257,15 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
     let index = invoice_index(app, ctx, invoice_id)?;
     let mut invoice = array(&app.db, "invoices")[index].clone();
     if matches!(text(&invoice, "status"), "LUNAS" | "KLAIM_DIAJUKAN") {
+        let req_method = text(body, "paymentMethod");
+        let req_discount = body.get("discountAmount").and_then(Value::as_f64);
+        if (!req_method.is_empty() && req_method != text(&invoice, "paymentMethod"))
+            || req_discount.is_some_and(|d| (d.round() - number(&invoice, "discountAmount").round()).abs() > 0.5)
+        {
+            return Err(conflict(
+                "Tagihan sudah diselesaikan sebelumnya dengan metode atau nominal diskon berbeda.",
+            ));
+        }
         return json_response(200, invoice);
     }
     if text(&invoice, "pricingStatus") != "COMPLETE" {
@@ -342,19 +351,21 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
         record_books(app, ctx, &entry);
     }
     let visit_id = text(&invoice, "visitId");
-    let orders_open = ["labOrders", "pharmacyOrders", "radiologyOrders"].iter().any(|key| {
-        array(&app.db, key).iter().any(|row| {
-            text(row, "visitId") == visit_id
-                && text(row, "facilityCode") == ctx.facility_code
-                && !matches!(text(row, "status"), "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED" | "BATAL" | "")
-        })
-    });
-    if !orders_open {
-        for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
-            text(v, "id") == visit_id && text(v, "facilityCode") == ctx.facility_code
-        }) {
-            visit["status"] = json!("SELESAI");
-            visit["updatedAt"] = json!(timestamp);
+    if !visit_id.is_empty() {
+        let orders_open = ["labOrders", "pharmacyOrders", "radiologyOrders"].iter().any(|key| {
+            array(&app.db, key).iter().any(|row| {
+                text(row, "visitId") == visit_id
+                    && text(row, "facilityCode") == ctx.facility_code
+                    && !matches!(text(row, "status"), "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED" | "BATAL" | "")
+            })
+        });
+        if !orders_open {
+            for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
+                text(v, "id") == visit_id && text(v, "facilityCode") == ctx.facility_code
+            }) {
+                visit["status"] = json!("SELESAI");
+                visit["updatedAt"] = json!(timestamp);
+            }
         }
     }
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
@@ -415,13 +426,15 @@ fn set_pricing(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Val
             if !quantity.is_finite() || quantity <= 0.0 {
                 return Err(bad_request("Kuantitas komponen tersimpan tidak valid."));
             }
+            let unit_price = unit_price.round();
             existing["unitPrice"] = json!(unit_price);
-            existing["subtotal"] = json!(quantity * unit_price);
+            existing["subtotal"] = json!((quantity * unit_price).round());
         } else if let Some(index) = remaining.iter().position(|row| (!key.is_empty() && text(row, "key") == key) || (!component_id.is_empty() && (text(row, "id") == component_id || text(row, "key") == component_id))) {
             let pending = remaining.remove(index);
             let quantity = number(&pending, "quantity");
             let quantity = if quantity.is_finite() && quantity > 0.0 { quantity } else { 1.0 };
-            items.push(json!({"id": if text(&pending, "id").is_empty() { json!(id("bli")) } else { pending["id"].clone() }, "key": if text(&pending, "key").is_empty() { json!(key) } else { pending["key"].clone() }, "category": pending["category"], "description": pending["description"], "quantity": quantity, "unitPrice": unit_price, "subtotal": quantity * unit_price}));
+            let unit_price = unit_price.round();
+            items.push(json!({"id": if text(&pending, "id").is_empty() { json!(id("bli")) } else { pending["id"].clone() }, "key": if text(&pending, "key").is_empty() { json!(key) } else { pending["key"].clone() }, "category": pending["category"], "description": pending["description"], "quantity": quantity, "unitPrice": unit_price, "subtotal": (quantity * unit_price).round()}));
         } else {
             return Err(bad_request("Komponen tagihan tidak dikenal. Penetapan harga tidak boleh menambah atau mengganti komponen."));
         }
@@ -480,7 +493,8 @@ fn add_item(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value)
     } else {
         text(body, "category")
     };
-    array_mut(&mut invoice,"items").push(json!({"id":id("item"),"category":category,"description":text(body,"description").trim(),"quantity":quantity,"unitPrice":price,"subtotal":quantity*price}));
+    let price = price.round();
+    array_mut(&mut invoice,"items").push(json!({"id":id("item"),"category":category,"description":text(body,"description").trim(),"quantity":quantity,"unitPrice":price,"subtotal":(quantity*price).round()}));
     let discount = number(&invoice, "discountAmount");
     recalculate(&mut invoice, discount);
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();

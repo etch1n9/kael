@@ -1252,6 +1252,20 @@ export function AllPatientsModule({
                   className="w-full px-3 py-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714] font-mono"
                 />
               </div>
+              <div>
+                <label className="block font-semibold mb-1">Golongan Darah</label>
+                <select
+                  value={formBloodType}
+                  onChange={(e) => setFormBloodType(e.target.value as Patient['bloodType'])}
+                  className="w-full px-3 py-2 rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
+                >
+                  <option value="TIDAK_DIKETAHUI">Belum Diketahui</option>
+                  <option value="O">O</option>
+                  <option value="A">A</option>
+                  <option value="B">B</option>
+                  <option value="AB">AB</option>
+                </select>
+              </div>
               <div className="col-span-full">
                 <label className="block font-semibold mb-1">Alamat Lengkap Domisili</label>
                 <input

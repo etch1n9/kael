@@ -292,13 +292,14 @@ fn direct(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Value
     }
     let quantity = n(body, "quantity");
     let price = n(&med, "sellPrice");
+    let reference = id("DSP");
     allocate(
         app,
         ctx,
         &mut med,
         quantity,
         price,
-        &id("DSP"),
+        &reference,
         target,
         value_or(
             body,
@@ -311,7 +312,6 @@ fn direct(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Value
         text(&med, "name"),
         text(&med, "unit")
     );
-    let reference = id("DSP");
     post_cogs(app, ctx, (quantity * n(&med, "buyPrice")).round(), &description, &reference);
     let visit_id = text(body, "visitId");
     if !visit_id.is_empty() {
@@ -343,7 +343,11 @@ fn dispense(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -
     if text(&order, "status") == "DISERAHKAN" {
         return Err(conflict("Resep ini sudah diserahkan sebelumnya."));
     }
+    if text(&order, "status") == "BATAL" {
+        return Err(conflict("Resep ini telah dibatalkan dan tidak dapat diserahkan."));
+    }
     let mut dispensed = vec![];
+    let mut total_cogs = 0.0;
     for item in array(&order, "items") {
         let med_index = array(&app.db, "medications")
             .iter()
@@ -393,8 +397,16 @@ fn dispense(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -
         )? {
             dispensed.push(json!({"medicationCode":med["code"],"batchNumber":allocation["batchNumber"],"quantity":allocation["quantity"]}));
         }
+        total_cogs += (n(item, "quantity") * n(&med, "buyPrice")).round();
         array_mut(&mut app.db, "medications")[med_index] = med;
     }
+    post_cogs(
+        app,
+        ctx,
+        total_cogs,
+        &format!("HPP Penyerahan E-Resep {} - {}", text(&order, "patientName"), text(&order, "mrNumber")),
+        order_id,
+    );
     order["status"] = json!("DISERAHKAN");
     order["dispensedBatches"] = json!(dispensed);
     order["dispensedBy"] = ctx.user["fullName"].clone();

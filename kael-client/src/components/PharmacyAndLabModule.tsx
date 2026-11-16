@@ -138,6 +138,8 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
   const [newMedBuyPrice, setNewMedBuyPrice] = useState<number | ''>('');
   const [newMedSellPrice, setNewMedSellPrice] = useState<number | ''>('');
   const [newMedStock, setNewMedStock] = useState<number>(0);
+  const [newMedBatchNumber, setNewMedBatchNumber] = useState('');
+  const [newMedExpiryDate, setNewMedExpiryDate] = useState('');
 
   // 6. Laboratory State
   const [selectedLabOrder, setSelectedLabOrder] = useState<LabOrder | null>(
@@ -460,11 +462,17 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         quantity: Number(restockQty),
         supplierName,
       });
+      const addedQty = restockQty;
+      const addedBatch = batchNumber.toUpperCase();
+      setBatchNumber('');
+      setExpiryDate('');
+      setRestockQty(1);
+      setSupplierName('');
       await onRefreshWorkspace();
       setFeedback({
         type: 'success',
-        text: `Obat Masuk +${restockQty} ${updated.unit} untuk ${updated.name} Batch ${batchNumber.toUpperCase()} senilai ${formatRupiah(
-          Number(restockQty) * updated.buyPrice
+        text: `Obat Masuk +${addedQty} ${updated.unit} untuk ${updated.name} Batch ${addedBatch} senilai ${formatRupiah(
+          Number(addedQty) * updated.buyPrice
         )} otomatis ditambahkan ke stok dan dicatat pada mutasi stok. Penerimaan stok ini tidak membuktikan pembayaran.`,
       });
     } catch (err) {
@@ -489,12 +497,17 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         patientOrUnitName: outPatientOrUnit,
         notes: outNotes,
       });
+      const dispensedQty = outQty;
+      const dispensedTarget = outPatientOrUnit;
+      setOutQty(1);
+      setOutPatientOrUnit('');
+      setOutNotes('');
       await onRefreshWorkspace();
       setFeedback({
         type: 'success',
-        text: `Obat Keluar -${outQty} ${updated.unit} ${updated.name} senilai ${formatRupiah(
-          Number(outQty) * updated.sellPrice
-        )} untuk ${outPatientOrUnit} berhasil dipotong otomatis dari batch FEFO dan tercatat di Kartu Stok.`,
+        text: `Obat Keluar -${dispensedQty} ${updated.unit} ${updated.name} senilai ${formatRupiah(
+          Number(dispensedQty) * updated.sellPrice
+        )} untuk ${dispensedTarget} berhasil dipotong otomatis dari batch FEFO dan tercatat di Kartu Stok.`,
       });
     } catch (err) {
       setFeedback({
@@ -570,6 +583,10 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
   const handleCreateMasterMed = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMedCode.trim() || !newMedName.trim() || !newMedUnit.trim() || !newMedCategory || !newMedForm || newMedBuyPrice === '' || newMedSellPrice === '' || !Number.isFinite(newMedBuyPrice) || !Number.isFinite(newMedSellPrice) || newMedBuyPrice < 0 || newMedSellPrice < 0) { setFeedback({ type: 'error', text: 'Isi kode, nama, satuan, harga beli, dan harga jual obat secara eksplisit.' }); return; }
+    if (Number(newMedStock) > 0 && (!newMedBatchNumber.trim() || !newMedExpiryDate)) {
+      setFeedback({ type: 'error', text: 'Nomor batch dan tanggal kedaluwarsa wajib diisi jika stok awal > 0.' });
+      return;
+    }
     setFeedback(null);
     try {
       const created = await kaelApi.createMedication(token, facilityCode, {
@@ -582,10 +599,14 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         buyPrice: Number(newMedBuyPrice),
         sellPrice: Number(newMedSellPrice),
         initialStock: Number(newMedStock),
+        ...(Number(newMedStock) > 0 ? { initialBatchNumber: newMedBatchNumber.trim(), initialExpiryDate: newMedExpiryDate } : {}),
       });
       setNewMedCode('');
       setNewMedName('');
       setNewMedGeneric('');
+      setNewMedStock(0);
+      setNewMedBatchNumber('');
+      setNewMedExpiryDate('');
       setShowAddMasterModal(false);
       await onRefreshWorkspace();
       setFeedback({
@@ -686,6 +707,13 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         ],
       });
       await onRefreshWorkspace();
+      setPoSupplier('');
+      setPoInvoiceNo('');
+      setPoBatch('');
+      setPoExpiry('');
+      setPoUnitCost('');
+      setPoVatRate('');
+      setPoQty(1);
       const poObj = created.purchaseOrder || (created as any);
       setFeedback({
         type: 'success',
@@ -716,6 +744,11 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         impression: radImpression,
       });
       await onRefreshWorkspace();
+      setRadExamName('');
+      setRadIndication('');
+      setRadFindings('');
+      setRadImpression('');
+      setRadTariff('');
       setFeedback({
         type: 'success',
         text: created.status === 'EXPERTISE_VERIFIED'
@@ -1011,7 +1044,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               <label className="block font-semibold mb-1">Harga Beli HNA</label>
               <input
                 type="number"
-                min={1}
+                min={0}
                 value={newMedBuyPrice}
                 onChange={(e) => setNewMedBuyPrice(e.target.value === '' ? '' : Number(e.target.value))}
                 className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
@@ -1021,7 +1054,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
               <label className="block font-semibold mb-1">Harga Jual HJA</label>
               <input
                 type="number"
-                min={1}
+                min={0}
                 value={newMedSellPrice}
                 onChange={(e) => setNewMedSellPrice(e.target.value === '' ? '' : Number(e.target.value))}
                 className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
@@ -1037,6 +1070,31 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                 className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
               />
             </div>
+            {Number(newMedStock) > 0 && (
+              <>
+                <div>
+                  <label className="block font-semibold mb-1">Nomor Batch Awal</label>
+                  <input
+                    type="text"
+                    required
+                    value={newMedBatchNumber}
+                    onChange={(e) => setNewMedBatchNumber(e.target.value)}
+                    placeholder="Mis. BATCH-01"
+                    className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold mb-1">Kedaluwarsa Awal (ED)</label>
+                  <input
+                    type="date"
+                    required
+                    value={newMedExpiryDate}
+                    onChange={(e) => setNewMedExpiryDate(e.target.value)}
+                    className="min-w-0 w-full px-3 py-2 font-mono rounded-xl border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           </div>

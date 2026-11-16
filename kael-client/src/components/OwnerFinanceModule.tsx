@@ -113,6 +113,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
         mutations: workspace.medicationMutations || [],
         purchaseOrders: workspace.purchaseOrders || [],
         visits: workspace.visits || [],
+        doubleEntryJournals: workspace.doubleEntryJournals || [],
         nearExpiryThresholdDays: workspace.activeFacilityConfig?.pharmacyPolicy.nearExpiryThresholdDays,
       }),
     [
@@ -122,6 +123,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
       workspace.medicationMutations,
       workspace.purchaseOrders,
       workspace.visits,
+      workspace.doubleEntryJournals,
       workspace.activeFacilityConfig?.pharmacyPolicy.nearExpiryThresholdDays,
     ]
   );

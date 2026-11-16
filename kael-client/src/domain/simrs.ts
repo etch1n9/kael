@@ -847,6 +847,7 @@ export interface BillingLineItem {
     | 'BEDAH_IBS'
     | 'MCU';
   description: string;
+  key?: string;
   quantity: number;
   unitPrice: number;
   subtotal: number;

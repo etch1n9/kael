@@ -40,6 +40,15 @@ pub fn handle(
     path: &str,
     body: &Value,
 ) -> Option<ApiResult> {
+    if method == "PUT" {
+        if let Some(order_id) = path.strip_prefix("/api/radiology/") {
+            return Some(radiology_verify(app, ctx, order_id, body));
+        }
+        if let Some(schedule_id) = path.strip_prefix("/api/surgical-schedules/") {
+            return Some(surgery_update(app, ctx, schedule_id, body));
+        }
+        return None;
+    }
     if method != "POST" {
         return None;
     }
@@ -203,7 +212,14 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             .find(|row| text(row, "code") == ctx.facility_code)
             .map(|row| default(row, "tenantId", &ctx.facility_code).to_owned())
             .unwrap_or_else(|| ctx.facility_code.clone());
-        let journal = json!({"id":id("gl"),"tenantId":tenant,"facilityCode":ctx.facility_code,"journalNumber":format!("GL/{}/{}/{}",ctx.facility_code.chars().take(4).collect::<String>(),timestamp[..10].replace('-',""),array(&app.db,"doubleEntryJournals").len()+1),"timestamp":timestamp,"eventType":"INVENTORY_RECEIVED_PBF","sourceTransactionId":po_number,"description":format!("Penerimaan Faktur PBF {supplier} ({invoice})"),"lines":[{"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP (HNA + PPN)","accountCategory":"ASSET","debit":total.round(),"credit":0,"costCenterCode":"CC-FAR"},{"accountCode":"2-1100","accountName":"Utang Dagang Distributor PBF","accountCategory":"LIABILITY","debit":0,"credit":total.round(),"costCenterCode":"CC-FAR"}],"totalDebit":total.round(),"totalCredit":total.round(),"isBalanced":total>0.0,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
+        let prefix = format!(
+            "GL/{}/{}/",
+            ctx.facility_code.chars().take(4).collect::<String>(),
+            timestamp[..10].replace('-', "")
+        );
+        let seq = next_document(array(&app.db, "doubleEntryJournals"), "journalNumber", &prefix);
+        let journal_number = format!("{prefix}{seq:04}");
+        let journal = json!({"id":id("gl"),"tenantId":tenant,"facilityCode":ctx.facility_code,"journalNumber":journal_number,"timestamp":timestamp,"eventType":"INVENTORY_RECEIVED_PBF","sourceTransactionId":po_number,"description":format!("Penerimaan Faktur PBF {supplier} ({invoice})"),"lines":[{"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP (HNA + PPN)","accountCategory":"ASSET","debit":total.round(),"credit":0,"costCenterCode":"CC-FAR"},{"accountCode":"2-1100","accountName":"Utang Dagang Distributor PBF","accountCategory":"LIABILITY","debit":0,"credit":total.round(),"costCenterCode":"CC-FAR"}],"totalDebit":total.round(),"totalCredit":total.round(),"isBalanced":total>0.0,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
         array_mut(&mut app.db, "doubleEntryJournals").push(journal.clone());
         let entry = json!({"id":id("acc"),"facilityCode":ctx.facility_code,"entryNumber":journal["journalNumber"],"timestamp":timestamp,"accountCode":"1-1400","accountName":"Persediaan Obat & BMHP","type":"ASET","category":"PERSEDIAAN","description":journal["description"],"amount":total.round(),"referenceId":po_number});
         array_mut(&mut app.db, "accountingEntries").push(entry);
@@ -274,6 +290,41 @@ fn radiology(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     );
     save(app)?;
     json_response(201, order)
+}
+
+fn radiology_verify(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -> ApiResult {
+    require_service(app, ctx, &["RADIOLOGI_RIS"], &["SUB_RADIOLOGY_IMAGING"])?;
+    let index = array(&app.db, "radiologyOrders")
+        .iter()
+        .position(|row| text(row, "id") == order_id && text(row, "facilityCode") == ctx.facility_code)
+        .ok_or_else(|| not_found("Order radiologi tidak ditemukan."))?;
+    let mut order = array(&app.db, "radiologyOrders")[index].clone();
+    if text(&order, "status") == "BATAL" {
+        return Err(conflict("Order radiologi yang dibatalkan tidak dapat diverifikasi."));
+    }
+    let findings = alias(body, "findingsText", "findings").trim();
+    let impression = alias(body, "impressionConclusion", "impression").trim();
+    if findings.is_empty() {
+        return Err(bad_request("Temuan hasil radiologi wajib diisi untuk verifikasi."));
+    }
+    let timestamp = now();
+    order["findingsText"] = json!(findings);
+    order["findings"] = json!(findings);
+    order["impressionConclusion"] = json!(impression);
+    order["impression"] = json!(impression);
+    order["status"] = json!("EXPERTISE_VERIFIED");
+    order["radiologistName"] = ctx.user["fullName"].clone();
+    order["verifiedAt"] = json!(timestamp);
+    array_mut(&mut app.db, "radiologyOrders")[index] = order.clone();
+    audit(
+        app,
+        ctx,
+        "RADIOLOGY_EXPERTISE_VERIFIED",
+        text(&order, "accessionNumber"),
+        &format!("Verifikasi hasil radiologi {}.", text(&order, "examName")),
+    );
+    save(app)?;
+    json_response(200, order)
 }
 
 fn referral(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
@@ -410,6 +461,42 @@ fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     json_response(201, record)
 }
 
+fn surgery_update(app: &mut App, ctx: &RequestContext, schedule_id: &str, body: &Value) -> ApiResult {
+    require_service(app, ctx, &["BEDAH_IBS"], &["SUB_SURGERY_IBS"])?;
+    let index = array(&app.db, "surgicalSchedules")
+        .iter()
+        .position(|row| text(row, "id") == schedule_id && text(row, "facilityCode") == ctx.facility_code)
+        .ok_or_else(|| not_found("Jadwal operasi tidak ditemukan."))?;
+    let mut record = array(&app.db, "surgicalSchedules")[index].clone();
+    if let Some(sign_in) = body.get("whoSignInCompleted").and_then(Value::as_bool) {
+        record["whoSignInCompleted"] = json!(sign_in);
+    }
+    if let Some(time_out) = body.get("whoTimeOutCompleted").and_then(Value::as_bool) {
+        record["whoTimeOutCompleted"] = json!(time_out);
+    }
+    if let Some(sign_out) = body.get("whoSignOutCompleted").and_then(Value::as_bool) {
+        record["whoSignOutCompleted"] = json!(sign_out);
+    }
+    let next_status = text(body, "status").trim();
+    if !next_status.is_empty() {
+        if !matches!(next_status, "SCHEDULED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED") {
+            return Err(bad_request("Status jadwal operasi tidak valid."));
+        }
+        record["status"] = json!(next_status);
+    }
+    record["updatedAt"] = json!(now());
+    array_mut(&mut app.db, "surgicalSchedules")[index] = record.clone();
+    audit(
+        app,
+        ctx,
+        "SURGERY_SCHEDULE_UPDATED",
+        text(&record, "id"),
+        &format!("Pembaruan jadwal operasi {}.", text(&record, "procedureName")),
+    );
+    save(app)?;
+    json_response(200, record)
+}
+
 fn staff_record(app: &mut App, ctx: &RequestContext, body: &Value, collection: &str, action: &str) -> ApiResult {
     if collection == "payrollRuns" && text(&ctx.user, "role") != "SUPERUSER" {
         require_service(app, ctx, &["SDM_ERP"], &[])?;
@@ -424,6 +511,9 @@ fn staff_record(app: &mut App, ctx: &RequestContext, body: &Value, collection: &
         _ => "PENDING".into(),
     };
     let amount = body["amount"].as_f64().filter(|amount| amount.is_finite()).unwrap_or(0.0).round();
+    if amount < 0.0 {
+        return Err(bad_request("Nominal tidak boleh negatif."));
+    }
     let record = json!({"id":id("sdm"),"facilityCode":ctx.facility_code,"staffName":text(body,"staffName").trim(),"kind":action,"note":text(body,"note").trim().chars().take(4000).collect::<String>(),"amount":amount,"status":status,"date":text(body,"date").trim(),"createdAt":now(),"createdBy":text(&ctx.user,"username")});
     array_mut(&mut app.db, collection).push(record.clone());
     if collection == "payrollRuns" && amount > 0.0 && status == "APPROVED" {

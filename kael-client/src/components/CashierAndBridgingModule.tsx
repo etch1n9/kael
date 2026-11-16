@@ -50,7 +50,7 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
   useEffect(() => {
     if (!allowedTabs.includes(activeTab) && allowedTabs[0]) setActiveTab(allowedTabs[0] as typeof activeTab);
   }, [initialView, activeTab, grantedModules.join(',')]);
-  const [pricingDraft, setPricingDraft] = useState<Array<{ category: BillingLineItem['category']; description: string; quantity: number; unitPrice: number | '' }> | null>(null);
+  const [pricingDraft, setPricingDraft] = useState<Array<{ id?: string; key?: string; category: BillingLineItem['category']; description: string; quantity: number; unitPrice: number | '' }> | null>(null);
   const [isSavingPrices, setIsSavingPrices] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceRecord | null>(
     workspace.invoices[0] || null
@@ -168,8 +168,8 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
   const openPricingEditor = () => {
     if (!selectedInvoice) return;
     setPricingDraft([
-      ...selectedInvoice.items.map(({ category, description, quantity, unitPrice }) => ({ category, description, quantity, unitPrice })),
-      ...(selectedInvoice.unpricedItems || []).map(({ category, description, quantity }) => ({ category, description, quantity, unitPrice: '' as const })),
+      ...selectedInvoice.items.map(({ id, key, category, description, quantity, unitPrice }) => ({ id, key, category, description, quantity, unitPrice })),
+      ...(selectedInvoice.unpricedItems || []).map(({ key, category, description, quantity }) => ({ key, category, description, quantity, unitPrice: '' as const })),
     ]);
   };
 
@@ -237,6 +237,9 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
         amount: Number(jrnAmount),
       });
       setJrnDesc('');
+      setJrnAmount('');
+      setJrnAccountCode('');
+      setJrnAccountName('');
       setShowAddJournal(false);
       await onRefreshWorkspace();
       setFeedback({
@@ -280,7 +283,7 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
       `"${cell(acc.description)}"`,
       acc.amount,
     ]);
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const csvContent = `\uFEFF${[headers.join(','), ...rows.map((r) => r.join(','))].join('\n')}`;
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -289,7 +292,7 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleTriggerBridging = async (

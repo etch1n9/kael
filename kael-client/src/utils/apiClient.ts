@@ -473,6 +473,7 @@ export const kaelApi = {
       quantity: number;
       patientOrUnitName: string;
       notes?: string;
+      visitId?: string;
     }
   ) =>
     requestJson<MedicationInventory>(
@@ -766,6 +767,12 @@ export const kaelApi = {
 
   scheduleSurgery: (token: string, facilityCode: string, payload: { procedureName: string; scheduledStart: string; patientName: string; mrNumber: string; operatingRoomCode: string; surgeonName: string; icd9CmCode?: string }) =>
     requestJson<Record<string, unknown>>('/surgical-schedules', { method: 'POST', body: JSON.stringify(payload) }, token, facilityCode),
+
+  updateSurgicalSchedule: (token: string, facilityCode: string, scheduleId: string, payload: { status?: string; whoSignInCompleted?: boolean; whoTimeOutCompleted?: boolean; whoSignOutCompleted?: boolean }) =>
+    requestJson<Record<string, unknown>>(`/surgical-schedules/${encodeURIComponent(scheduleId)}`, { method: 'PUT', body: JSON.stringify(payload) }, token, facilityCode),
+
+  verifyRadiologyOrder: (token: string, facilityCode: string, orderId: string, payload: { findingsText: string; impressionConclusion?: string }) =>
+    requestJson<RadiologyOrderRis>(`/radiology/${encodeURIComponent(orderId)}`, { method: 'PUT', body: JSON.stringify(payload) }, token, facilityCode),
 
   recordStaff: (
     token: string,

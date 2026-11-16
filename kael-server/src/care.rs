@@ -573,13 +573,24 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
                     continue;
                 }
                 let current = text(row, "status");
-                if key == "invoices" && current == "LUNAS" {
+                if key == "invoices" && matches!(current, "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI") {
                     continue;
                 }
-                if !matches!(current, "BATAL" | "LUNAS" | "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED") {
+                if !matches!(current, "BATAL" | "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI" | "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED") {
                     row["status"] = json!("BATAL");
                 }
             }
+        }
+        let mut released_beds = Vec::new();
+        for bed in array_mut(&mut app.db, "beds") {
+            if text(bed, "facilityCode") == ctx.facility_code && text(bed, "visitId") == visit_id && text(bed, "status") == "TERISI" {
+                released_beds.push(bed.clone());
+                bed["status"] = json!("TERSEDIA");
+                clear_bed(bed);
+            }
+        }
+        for bed in released_beds {
+            close_admission(&mut app.db, &bed);
         }
     }
     visit["status"] = json!(status);
@@ -675,9 +686,18 @@ fn bill_occupied_bed(app: &mut App, ctx: &RequestContext, bed: &Value) {
     if patient_id.is_empty() {
         return;
     }
-    let matched = array(&app.db, "visits").iter().rev().find(|visit| {
-        text(visit, "facilityCode") == ctx.facility_code && text(visit, "patientId") == patient_id
-    }).cloned();
+    let bed_visit_id = text(bed, "visitId");
+    let matched = if !bed_visit_id.is_empty() {
+        array(&app.db, "visits").iter().find(|visit| {
+            text(visit, "facilityCode") == ctx.facility_code && text(visit, "id") == bed_visit_id
+        }).cloned()
+    } else {
+        None
+    }.or_else(|| {
+        array(&app.db, "visits").iter().rev().find(|visit| {
+            text(visit, "facilityCode") == ctx.facility_code && text(visit, "patientId") == patient_id
+        }).cloned()
+    });
     let guarantor = matched.as_ref().map(|visit| text(visit, "guarantor").to_owned()).unwrap_or_else(|| "UMUM".into());
     let settlement = matched.as_ref().map(|visit| text(visit, "guarantorSettlement").to_owned()).filter(|value| value == "BPJS").unwrap_or_else(|| "PATIENT".into());
     let visit_id = matched.as_ref().map(|visit| text(visit, "id").to_owned()).unwrap_or_default();
@@ -1110,27 +1130,35 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         ));
     }
     let vital_signs = vitals(&json!({"vitals":body["objective"]["vitals"]}))?;
+    let mut plan = body["plan"].clone();
+    let mut validated_prescriptions = Vec::new();
     for prescription in array(&body["plan"], "prescriptions") {
         let qty = n(prescription, "quantity");
-        let price = n(prescription, "unitPrice");
-        if !qty.is_finite()
-            || qty <= 0.0
-            || !price.is_finite()
-            || price < 0.0
-            || !prescription["unitPrice"].is_number()
-            || !(qty * price).is_finite()
-        {
-            return Err(bad_request("Kuantitas dan harga resep tidak valid."));
+        if !qty.is_finite() || qty <= 0.0 {
+            return Err(bad_request("Kuantitas resep tidak valid."));
         }
-        if !array(&app.db, "medications").iter().any(|med| {
+        let catalog_med = array(&app.db, "medications").iter().find(|med| {
             text(med, "facilityCode") == ctx.facility_code
                 && (text(med, "id") == text(prescription, "medicationId")
                     || text(med, "code") == text(prescription, "medicationCode"))
-        }) {
-            return Err(bad_request(
-                "Obat dalam resep harus terdaftar di katalog fasilitas ini.",
-            ));
+        }).cloned().ok_or_else(|| {
+            bad_request("Obat dalam resep harus terdaftar di katalog fasilitas ini.")
+        })?;
+        let catalog_price = n(&catalog_med, "sellPrice");
+        let price = if catalog_price.is_finite() && catalog_price >= 0.0 {
+            catalog_price
+        } else {
+            n(prescription, "unitPrice")
+        };
+        if !price.is_finite() || price < 0.0 || !(qty * price).is_finite() {
+            return Err(bad_request("Kuantitas dan harga resep tidak valid."));
         }
+        let mut item = prescription.clone();
+        item["unitPrice"] = json!(price);
+        validated_prescriptions.push(item);
+    }
+    if let Some(plan_obj) = plan.as_object_mut() {
+        plan_obj.insert("prescriptions".into(), json!(validated_prescriptions));
     }
     for procedure in array(&body["plan"], "procedures") {
         if procedure.get("tariff").is_some_and(|value| {
@@ -1147,7 +1175,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     });
     let existing = si.map(|i| array(&app.db, "soapRecords")[i].clone());
     let timestamp = now();
-    let incoming = json!({"id":existing.as_ref().map(|row|row["id"].clone()).unwrap_or_else(||json!(id("soap"))),"visitId":visit["id"],"facilityCode":ctx.facility_code,"patientId":patient["id"],"doctorId":ctx.user["id"],"doctorName":ctx.user["fullName"],"recordedAt":existing.as_ref().map(|row|row["recordedAt"].clone()).unwrap_or_else(||json!(timestamp)),"subjective":body["subjective"],"objective":body["objective"],"assessment":body["assessment"],"plan":body["plan"],"satusehatEncounterId":existing.as_ref().map(|row|row["satusehatEncounterId"].clone()).unwrap_or_else(||json!("")),"syncedToSatusehat":false});
+    let incoming = json!({"id":existing.as_ref().map(|row|row["id"].clone()).unwrap_or_else(||json!(id("soap"))),"visitId":visit["id"],"facilityCode":ctx.facility_code,"patientId":patient["id"],"doctorId":ctx.user["id"],"doctorName":ctx.user["fullName"],"recordedAt":existing.as_ref().map(|row|row["recordedAt"].clone()).unwrap_or_else(||json!(timestamp)),"subjective":body["subjective"],"objective":body["objective"],"assessment":body["assessment"],"plan":plan,"satusehatEncounterId":existing.as_ref().map(|row|row["satusehatEncounterId"].clone()).unwrap_or_else(||json!("")),"syncedToSatusehat":false});
     let reason = text(body, "correctionReason").trim();
     let record = apply_clinical_record(existing.as_ref(), &incoming, &ctx.user, reason, &timestamp)
         .map_err(|message| {
@@ -1190,7 +1218,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     } else {
         array_mut(&mut app.db, "soapRecords").push(record.clone());
     }
-    if matches!(text(&record, "recordStatus"), "ADDENDUM_APPENDED" | "AMENDED_WITHIN_48H")
+    if text(&record, "recordStatus") == "ADDENDUM_APPENDED"
         || prior_invoice
             .as_ref()
             .map(|invoice| text(invoice, "status") != "BELUM_LUNAS")
@@ -1296,7 +1324,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             .filter(|number| number.is_finite() && *number >= 0.0)
         {
             let reused = prior_items.iter().find(|item| text(item, "key") == key).map(|item| item["id"].clone());
-            items.push(json!({"id":reused.unwrap_or_else(|| json!(id("bli"))),"key":key,"category":category,"description":description,"quantity":quantity,"unitPrice":tariff,"subtotal":quantity*tariff}));
+            items.push(json!({"id":reused.unwrap_or_else(|| json!(id("bli"))),"key":key,"category":category,"description":description,"quantity":quantity,"unitPrice":tariff.round(),"subtotal":(quantity*tariff.round()).round()}));
         } else {
             return Err(bad_request(
                 "Tarif layanan harus berupa angka nonnegatif atau belum diisi.",

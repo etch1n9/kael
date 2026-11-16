@@ -415,6 +415,14 @@ export const LAB_PARAMETER_TEMPLATES: {
     refMax: null,
   },
   {
+    code: 'SGOT',
+    name: 'SGOT (AST)',
+    category: 'KIMIA_DARAH',
+    unit: 'U/L',
+    refMin: null,
+    refMax: null,
+  },
+  {
     code: 'NS1',
     name: 'Antigen Dengue NS1 Rapid',
     category: 'IMUNOSEROLOGI',
@@ -743,6 +751,10 @@ export function calculateSparklineMetrics(values: number[]): SparklineMetrics {
 }
 
 
+function toWibDateKey(ms: number): string {
+  return new Date(ms + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 export function buildCashflowTimeSeries(
   accountingEntries: AccountingEntry[],
   daysCount = 12
@@ -750,8 +762,9 @@ export function buildCashflowTimeSeries(
   const byDate = new Map<string, { inflow: number; outflow: number }>();
 
   for (const entry of accountingEntries) {
-    if (!entry.timestamp || !Number.isFinite(Date.parse(entry.timestamp))) continue;
-    const dateKey = new Date(entry.timestamp).toISOString().slice(0, 10);
+    const parsedMs = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
+    if (!Number.isFinite(parsedMs)) continue;
+    const dateKey = toWibDateKey(parsedMs);
     const prev = byDate.get(dateKey) || { inflow: 0, outflow: 0 };
     if (entry.type === 'PENDAPATAN') {
       prev.inflow += entry.amount;
@@ -761,7 +774,7 @@ export function buildCashflowTimeSeries(
     byDate.set(dateKey, prev);
   }
 
-  const anchorStr = new Date().toISOString().slice(0, 10);
+  const anchorStr = toWibDateKey(Date.now());
   const anchorDate = new Date(`${anchorStr}T00:00:00.000Z`);
 
   const points: CashflowChartPoint[] = [];

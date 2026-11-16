@@ -202,6 +202,20 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
   );
 
   useEffect(() => {
+    setNodeName(workspace.serverConfig.nodeName);
+    setSatusehatBaseUrl(workspace.serverConfig.satusehatBaseUrl);
+    setBpjsBaseUrl(workspace.serverConfig.bpjsBaseUrl);
+    setIomtPort(workspace.serverConfig.iomtListenPort);
+    setSessionTimeout(workspace.serverConfig.sessionTimeoutMinutes);
+  }, [
+    workspace.serverConfig.nodeName,
+    workspace.serverConfig.satusehatBaseUrl,
+    workspace.serverConfig.bpjsBaseUrl,
+    workspace.serverConfig.iomtListenPort,
+    workspace.serverConfig.sessionTimeoutMinutes,
+  ]);
+
+  useEffect(() => {
     if (!roles.some((entry) => entry.id === role && entry.active)) {
       setRole('');
     }
@@ -281,6 +295,9 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
       setFullName('');
       setNipOrSip('');
       setEmail('');
+      setRole('');
+      setSpecialization('');
+      setSelectedFacilities([facilityCode]);
       setDutyUnits([]);
       setIsPractitioner(false);
       await onRefreshWorkspace();

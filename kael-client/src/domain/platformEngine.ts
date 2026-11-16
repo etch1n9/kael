@@ -1140,11 +1140,12 @@ export function computeErpCompleteFinancialAnalysis(params: {
   mutations?: MedicationStockMutation[];
   purchaseOrders?: PurchaseOrderPbf[];
   visits?: VisitQueueItem[];
+  doubleEntryJournals?: unknown[];
   doctorSharePercent?: number;
   nearExpiryThresholdDays?: number;
   referenceDateStr?: string;
 }): ErpCompleteFinancialAnalysis {
-  const referenceDate = params.referenceDateStr || new Date().toISOString().slice(0, 10);
+  const referenceDate = params.referenceDateStr || new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const referenceMs = Date.parse(`${referenceDate}T00:00:00.000Z`);
   const recordedEntries = params.accountingEntries.filter((entry) => Number.isFinite(entry.amount));
   const totalRevenue = recordedEntries.filter((entry) => entry.type === 'PENDAPATAN').reduce((sum, entry) => sum + entry.amount, 0);
@@ -1186,7 +1187,7 @@ export function computeErpCompleteFinancialAnalysis(params: {
   for (const order of params.purchaseOrders || []) {
     if (!['RECEIVED_PARTIAL', 'RECEIVED_FULL'].includes(order.status)) continue;
     const amount = recordedNonnegative(order.grandTotalPayable ?? order.totalAmount);
-    const age = ageOf(order.dueDate);
+    const age = ageOf(order.dueDate || order.orderDate);
     if (amount !== null && age !== null) payableBuckets[age <= 30 ? 0 : age <= 60 ? 1 : age <= 90 ? 2 : 3] += amount;
   }
   const totalReceivables = receivableBuckets.reduce((sum, value) => sum + value, 0);

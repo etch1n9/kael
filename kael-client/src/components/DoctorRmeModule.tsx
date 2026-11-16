@@ -172,6 +172,8 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     );
     if (initialSubView === 'MCU_SURAT_MEDIS') {
       setShowPrintCertificate(true);
+    } else {
+      setShowPrintCertificate(false);
     }
     if (existingSoap) {
       setChiefComplaint(existingSoap.subjective.chiefComplaint);
@@ -374,7 +376,8 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     e.preventDefault();
     if (!activeVisit || !activePatient) return;
     setStatusBanner(null);
-    if (existingSoap && !correctionReason.trim()) { setStatusBanner({ type: 'error', text: 'Isi alasan perubahan rekam medis yang sebenarnya.' }); return; }
+    if (existingSoap && correctionReason.trim().length < 5) { setStatusBanner({ type: 'error', text: 'Isi alasan perubahan rekam medis minimal 5 karakter.' }); return; }
+    if (!chiefComplaint.trim()) { setStatusBanner({ type: 'error', text: 'Keluhan utama pasien wajib diisi.' }); return; }
     if (!hasCompleteVitals(vitals) || !primaryIcd10Code || !primaryIcd10Name || !prognosis || !disposition) {
       setStatusBanner({ type: 'error', text: 'Lengkapi tanda vital, diagnosis, prognosis, dan disposisi sebelum menyimpan.' });
       return;
@@ -656,16 +659,24 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
             <div className="pt-3 border-t border-[#E2ECE8] dark:border-[#183831] space-y-2 text-xs">
               <form className="grid gap-2 md:grid-cols-4" onSubmit={async (event) => {
                 event.preventDefault();
-                await kaelApi.scheduleSurgery(token, facilityCode, {
-                  procedureName: surgeryName,
-                  scheduledStart: surgeryAt,
-                  patientName: activeVisit.patientName,
-                  mrNumber: activeVisit.mrNumber,
-                  operatingRoomCode: surgeryRoom,
-                  surgeonName: workspace.user.fullName,
-                });
-                setSurgeryName('');
-                await onRefreshWorkspace();
+                setStatusBanner(null);
+                try {
+                  await kaelApi.scheduleSurgery(token, facilityCode, {
+                    procedureName: surgeryName,
+                    scheduledStart: surgeryAt,
+                    patientName: activeVisit.patientName,
+                    mrNumber: activeVisit.mrNumber,
+                    operatingRoomCode: surgeryRoom,
+                    surgeonName: workspace.user.fullName,
+                  });
+                  setSurgeryName('');
+                  setSurgeryAt('');
+                  setSurgeryRoom('');
+                  await onRefreshWorkspace();
+                  setStatusBanner({ type: 'success', text: 'Jadwal operasi berhasil disimpan.' });
+                } catch (err) {
+                  setStatusBanner({ type: 'error', text: err instanceof Error ? err.message : 'Gagal menjadwalkan operasi.' });
+                }
               }}>
                 <input required value={surgeryName} onChange={(event) => setSurgeryName(event.target.value)} placeholder="Nama tindakan" className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
                 <input required type="datetime-local" value={surgeryAt} onChange={(event) => setSurgeryAt(event.target.value)} className="rounded border border-slate-300 bg-white px-2 py-1.5 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
@@ -1042,26 +1053,28 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
               />
               <div className="max-h-36 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-lg divide-y divide-slate-100 dark:divide-slate-800">
                 {filteredIcd10.map((item) => (
-                  <button
+                  <div
                     key={item.code}
-                    type="button"
-                    onClick={() => {
-                      setPrimaryIcd10Code(item.code);
-                      setPrimaryIcd10Name(item.name);
-                      if (!clinicalImpression) setClinicalImpression(item.name);
-                    }}
-                    className={`w-full text-left px-3 py-1.5 text-xs flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer ${
+                    className={`w-full px-3 py-1.5 text-xs flex items-center justify-between gap-2 hover:bg-slate-50 dark:hover:bg-slate-800 ${
                       primaryIcd10Code === item.code
                         ? 'bg-teal-50/70 dark:bg-teal-950/50 font-semibold text-teal-800 dark:text-teal-300'
                         : ''
                     }`}
                   >
-                    <span className="truncate pr-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPrimaryIcd10Code(item.code);
+                        setPrimaryIcd10Name(item.name);
+                        if (!clinicalImpression) setClinicalImpression(item.name);
+                      }}
+                      className="min-w-0 flex-1 text-left truncate cursor-pointer"
+                    >
                       <strong className="font-mono">{item.code}</strong> — {item.name}
-                    </span>
-                    <span
-                      onClick={(e) => {
-                        e.stopPropagation();
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
                         if (!secondaryIcd10.some((sec) => sec.code === item.code)) {
                           setSecondaryIcd10((prev) => [
                             ...prev,
@@ -1069,11 +1082,11 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
                           ]);
                         }
                       }}
-                      className="text-caption font-mono px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-teal-700 hover:text-white shrink-0"
+                      className="text-caption font-mono px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-700 hover:bg-teal-700 hover:text-white shrink-0 cursor-pointer"
                     >
                       + Sekunder
-                    </span>
-                  </button>
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>

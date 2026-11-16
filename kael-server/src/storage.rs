@@ -418,7 +418,7 @@ fn write_database(
 }
 
 fn record_id(row: &Value) -> String {
-    for key in ["id", "configId", "snapshotId", "idempotencyKey", "code", "entryNumber", "invoiceNumber", "journalNumber"] {
+    for key in ["id", "configId", "snapshotId", "idempotencyKey", "scopeKey", "code", "entryNumber", "invoiceNumber", "journalNumber"] {
         let value = text_of(row, key);
         if !value.is_empty() {
             return value;
@@ -432,7 +432,7 @@ fn text_of(value: &Value, key: &str) -> String {
 }
 
 fn created_of(value: &Value) -> String {
-    for key in ["createdAt", "timestamp", "recordedAt", "publishedAt", "orderDate", "updatedAt"] {
+    for key in ["createdAt", "timestamp", "recordedAt", "publishedAt", "orderDate", "admittedAt", "scheduledStart", "updatedAt"] {
         let found = text_of(value, key);
         if !found.is_empty() {
             return found;

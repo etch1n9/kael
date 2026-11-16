@@ -552,6 +552,9 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
         diagnosis: assignDiagnosis,
       });
       setAssignBedId(null);
+      setAssignPatientId('');
+      setAssignDoctorName('');
+      setAssignDiagnosis('');
       await onRefreshWorkspace();
       setFeedbackMessage(
         `Tempat tidur ${updated.bedCode} kini ditempati oleh ${updated.patientName}.`
@@ -620,6 +623,10 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
         dailyRate: Number(newBedRate),
       });
       setNewBedCode('');
+      setNewBedRoom('');
+      setNewBedWard('');
+      setNewBedClass('');
+      setNewBedRate('');
       setShowAddBedForm(false);
       await onRefreshWorkspace();
       setFeedbackMessage(`Kamar/Bed baru ${created.bedCode} berhasil ditambahkan.`);
@@ -1917,7 +1924,6 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                     className="w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950"
                   >
                     <option value="ALL">Semua Gender</option>
-                    <option value="" disabled>Pilih jenis kelamin</option>
                     <option value="L">Laki-laki</option>
                     <option value="P">Perempuan</option>
                   </select>
@@ -1933,6 +1939,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                     <option value="A">Gol. A</option>
                     <option value="B">Gol. B</option>
                     <option value="AB">Gol. AB</option>
+                    <option value="TIDAK_DIKETAHUI">Tidak Diketahui</option>
                   </select>
                 </div>
                 <div className="sm:col-span-3">

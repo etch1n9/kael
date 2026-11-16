@@ -290,8 +290,23 @@ fn cap_sessions(app: &mut App) {
     }
 }
 
+fn prune_runtime_collections(app: &mut App) {
+    let audit_rows = array_mut(&mut app.db, "auditLogs");
+    if audit_rows.len() > 50_000 {
+        let excess = audit_rows.len() - 50_000;
+        audit_rows.drain(0..excess);
+    }
+    let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+    let idem_rows = array_mut(&mut app.db, "idempotencyRecords");
+    idem_rows.retain(|row| {
+        let ts = text(row, "createdAt");
+        ts.is_empty() || ts >= cutoff.as_str()
+    });
+}
+
 pub fn save(app: &mut App) -> Result<(), ApiError> {
     cap_sessions(app);
+    prune_runtime_collections(app);
     let digest = sessions_digest(&app.sessions);
     let packed: HashMap<String, (String, String, i64)> = app
         .sessions
@@ -326,7 +341,7 @@ pub fn save(app: &mut App) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn sessions_digest(sessions: &HashMap<String, Session>) -> u64 {
+pub fn sessions_digest(sessions: &HashMap<String, Session>) -> u64 {
     let mut tokens: Vec<_> = sessions.iter().collect();
     tokens.sort_by(|left, right| left.0.cmp(right.0));
     let mut hasher = DefaultHasher::new();
@@ -443,12 +458,14 @@ fn login(app: &mut App, body: &Value) -> ApiResult {
 
 struct LoginPrep {
     key: String,
+    ip_key: String,
+    username: String,
     password: String,
     hash: String,
     found: bool,
 }
 
-fn login_prepare(app: &mut App, body: &Value, _ip: &str) -> Result<LoginPrep, ApiError> {
+fn login_prepare(app: &mut App, body: &Value, ip: &str) -> Result<LoginPrep, ApiError> {
     let username = text(body, "username").trim().to_lowercase();
     let password = text(body, "password");
     if username.is_empty()
@@ -458,14 +475,18 @@ fn login_prepare(app: &mut App, body: &Value, _ip: &str) -> Result<LoginPrep, Ap
     {
         return Err(bad_request("Username dan kata sandi wajib diisi."));
     }
-    let key = username.clone();
+    let normalized_ip = ip.trim();
+    let key = format!("{username}@{normalized_ip}");
+    let ip_key = format!("ip:{normalized_ip}");
     let now_ms = Utc::now().timestamp_millis();
-    if let Some(attempt) = app.login_failures.get(&key) {
-        if attempt.locked_until > now_ms {
-            return Err(error(
-                429,
-                "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.",
-            ));
+    for check_key in [&key, &ip_key] {
+        if let Some(attempt) = app.login_failures.get(check_key) {
+            if attempt.locked_until > now_ms {
+                return Err(error(
+                    429,
+                    "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.",
+                ));
+            }
         }
     }
     let found = array(&app.db, "users").iter().position(|user| {
@@ -478,13 +499,15 @@ fn login_prepare(app: &mut App, body: &Value, _ip: &str) -> Result<LoginPrep, Ap
         .unwrap_or_else(|| DUMMY_HASH.clone());
     Ok(LoginPrep {
         key,
+        ip_key,
+        username,
         password: password.to_owned(),
         hash,
         found: found.is_some(),
     })
 }
 
-fn note_login_failure(app: &mut App, key: &str) {
+fn note_login_failure_with_limit(app: &mut App, key: &str, max_attempts: u8) {
     let now_ms = Utc::now().timestamp_millis();
     app.login_failures.retain(|_, attempt| attempt.locked_until > now_ms || now_ms - attempt.window_start < 15 * 60 * 1000);
     if app.login_failures.len() >= 4096 && !app.login_failures.contains_key(key) {
@@ -500,20 +523,25 @@ fn note_login_failure(app: &mut App, key: &str) {
         attempt.window_start = now_ms;
     }
     attempt.count += 1;
-    if attempt.count >= 5 {
+    if attempt.count >= max_attempts {
         attempt.locked_until = now_ms + 15 * 60 * 1000;
         attempt.count = 0;
         attempt.window_start = now_ms;
     }
 }
 
+fn note_login_failure(app: &mut App, key: &str) {
+    note_login_failure_with_limit(app, key, 5);
+}
+
 fn login_commit(app: &mut App, body: &Value, prep: &LoginPrep, password_ok: bool) -> ApiResult {
     if !prep.found || !password_ok {
         note_login_failure(app, &prep.key);
+        note_login_failure_with_limit(app, &prep.ip_key, 20);
         return Err(login_denied());
     }
     app.login_failures.remove(&prep.key);
-    let username = prep.key.as_str();
+    let username = prep.username.as_str();
     let index = array(&app.db, "users")
         .iter()
         .position(|user| {
