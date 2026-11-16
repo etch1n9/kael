@@ -129,6 +129,43 @@ impl Storage {
         Ok(())
     }
 
+    pub fn query_page(
+        &self,
+        collection: &str,
+        facility_code: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<Value>, usize), String> {
+        let total: i64 = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM records WHERE collection = ?1 AND facility_code = ?2",
+                params![collection, facility_code],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM records WHERE collection = ?1 AND facility_code = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3 OFFSET ?4",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                params![collection, facility_code, limit as i64, offset as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut items = Vec::new();
+        for row in rows {
+            let payload = row.map_err(|error| error.to_string())?;
+            if let Ok(val) = serde_json::from_str::<Value>(&payload) {
+                items.push(val);
+            }
+        }
+        Ok((items, total.max(0) as usize))
+    }
+
     pub fn load_sessions(&self) -> Result<Vec<(String, String, String, i64)>, String> {
         let mut statement = self
             .connection
@@ -202,6 +239,56 @@ impl Storage {
         Ok(value)
     }
 
+    pub fn backup_to(&self, dest: &Path) -> Result<(), String> {
+        if dest.exists() {
+            let _ = fs::remove_file(dest);
+        }
+        let escaped = dest.to_string_lossy().replace('\'', "''");
+        self.connection
+            .execute(&format!("VACUUM INTO '{escaped}'"), [])
+            .map_err(|error| error.to_string())?;
+        let dst_conn = Connection::open_with_flags(dest, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| error.to_string())?;
+        dst_conn
+            .pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())
+            .and_then(|res| {
+                if res == "ok" {
+                    Ok(())
+                } else {
+                    Err(format!("Integritas salinan database tidak valid: {res}"))
+                }
+            })
+    }
+
+    pub fn verify_and_restore(source: &Path, target: &Path) -> Result<(), String> {
+        if !source.is_file() {
+            return Err("Berkas sumber pemulihan tidak ditemukan.".into());
+        }
+        let src_conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("Berkas sumber tidak dapat dibuka: {error}"))?;
+        let integrity: String = src_conn
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        if integrity != "ok" {
+            return Err(format!("Pemeriksaan integritas berkas cadangan gagal: {integrity}"));
+        }
+        drop(src_conn);
+        let (_, _) = Self::load(source)?;
+        let parent = target.parent().ok_or_else(|| "Lokasi target tidak valid.".to_string())?;
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let temp = parent.join(format!(".kael-restore-{}.tmp", uuid::Uuid::new_v4()));
+        {
+            let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| error.to_string())?;
+            let escaped = temp.to_string_lossy().replace('\'', "''");
+            src.execute(&format!("VACUUM INTO '{escaped}'"), [])
+                .map_err(|error| error.to_string())?;
+        }
+        fs::rename(&temp, target).map_err(|error| format!("Gagal memasang database hasil pemulihan: {error}"))?;
+        Ok(())
+    }
+
     pub fn delete_session(&mut self, token: &str) -> Result<(), String> {
         self.connection
             .execute("DELETE FROM sessions WHERE token = ?1", params![token])
@@ -258,6 +345,16 @@ impl Storage {
 fn claim_lock(path: &Path) -> Result<(std::fs::File, std::path::PathBuf), String> {
     let lock_path = path.with_extension("sqlite.lock");
     for _ in 0..3 {
+        let temp_lock = path.with_extension(format!("sqlite.lock.{}", std::process::id()));
+        if let Ok(mut file) = OpenOptions::new().write(true).create(true).truncate(true).open(&temp_lock) {
+            let _ = write!(file, "{}", std::process::id());
+            let _ = file.sync_all();
+            if fs::hard_link(&temp_lock, &lock_path).is_ok() {
+                let _ = fs::remove_file(&temp_lock);
+                return Ok((file, lock_path));
+            }
+            let _ = fs::remove_file(&temp_lock);
+        }
         match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
             Ok(mut file) => {
                 let _ = write!(file, "{}", std::process::id());
@@ -285,7 +382,35 @@ fn migrate_v1(connection: &mut Connection) -> Result<(), String> {
     let payload: String = connection
         .query_row("SELECT payload FROM kael_state WHERE id = 1", [], |row| row.get(0))
         .map_err(|error| format!("Database skema lama tidak dapat dibaca: {error}"))?;
-    let db: Value = serde_json::from_str(&payload).map_err(|_| "Snapshot database lama tidak valid.".to_string())?;
+    let mut db: Value = serde_json::from_str(&payload).map_err(|_| "Snapshot database lama tidak valid.".to_string())?;
+    if let Some(obj) = db.as_object_mut() {
+        for (col_key, col_val) in obj.iter_mut() {
+            if col_key == "sessions" {
+                continue;
+            }
+            if let Some(rows) = col_val.as_array_mut() {
+                let mut seen = HashSet::new();
+                for (idx, row) in rows.iter_mut().enumerate() {
+                    let orig_id = record_id(row);
+                    let assigned = if orig_id.is_empty() {
+                        format!("mig-{col_key}-{}", idx + 1)
+                    } else if !seen.insert(orig_id.clone()) {
+                        if col_key == "soapRevisions" && row.get("soapId").is_none() {
+                            row["soapId"] = json!(orig_id);
+                        }
+                        let disambiguated = format!("{orig_id}-rev-{}", idx + 1);
+                        seen.insert(disambiguated.clone());
+                        disambiguated
+                    } else {
+                        orig_id
+                    };
+                    if row.is_object() && record_id(row) != assigned {
+                        row["id"] = json!(assigned);
+                    }
+                }
+            }
+        }
+    }
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;

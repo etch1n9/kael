@@ -149,7 +149,9 @@ export function DataExportToolbar<T = Record<string, unknown>>({
       </div>
 
       {/* Printable & Downloadable PDF Preview Modal */}
-      {showPdfPreview && (
+        { showPdfPreview && (() => {
+          const previewSlice = shownRows.slice(0, 200);
+          return (
         <ModalDialog onClose={() => setShowPdfPreview(false)} label={`Pratinjau & Unduh PDF ${title}`}>
           <div className="min-h-0 bg-white text-[#0F2922] rounded-2xl max-w-6xl w-full max-h-full flex flex-col overflow-hidden shadow-2xl border border-[#DCE7E3]">
             {/* Modal Action Bar */}
@@ -210,7 +212,7 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                 </div>
                 <div className="text-right text-xs text-[#52736B] font-mono">
                   <div>Dibuat: {new Date().toLocaleString('id-ID')}</div>
-                  <div>Total Data: {shownRows.length} baris</div>
+                  <div>Total Data: {shownRows.length} baris{shownRows.length > 200 ? ' (menampilkan 200 baris pertama di pratinjau)' : ''}</div>
                 </div>
               </div>
 
@@ -229,7 +231,7 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                     </tr>
                   </thead>
                   <tbody>
-                    {shownRows.length === 0 ? (
+                    {previewSlice.length === 0 ? (
                       <tr>
                         <td
                           colSpan={columns.length}
@@ -239,7 +241,7 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                         </td>
                       </tr>
                     ) : (
-                      shownRows.map((row, rIdx) => (
+                      previewSlice.map((row, rIdx) => (
                         <tr
                           key={rIdx}
                           className={rIdx % 2 === 0 ? 'bg-white' : 'bg-[#F4F9F7]'}
@@ -279,7 +281,8 @@ export function DataExportToolbar<T = Record<string, unknown>>({
             </div>
           </div>
         </ModalDialog>
-      )}
+          );
+        })()}
     </>
   );
 }

@@ -151,11 +151,13 @@ export function AllPatientsModule({
   }, [activeFacility.code, patients.length, visits.length]);
 
   useEffect(() => {
-    if (visitFilter === 'SEMUA' && polyFilter === 'ALL' && guarantorFilter === 'ALL' && regFilter === 'SEMUA' && genderFilter === 'ALL' && clinicalFlagFilter === 'ALL') return;
+    const needsAllPatients = regFilter !== 'SEMUA' || genderFilter !== 'ALL' || clinicalFlagFilter !== 'ALL' || guarantorFilter === 'BPJS_TERDAFTAR';
+    const needsVisitHistory = visitFilter !== 'SEMUA' || polyFilter !== 'ALL' || (guarantorFilter !== 'ALL' && guarantorFilter !== 'BPJS_TERDAFTAR');
+    if (!needsAllPatients && !needsVisitHistory) return;
     let cancelled = false;
     const loadAll = async () => {
       try {
-        if (!fullPatients) {
+        if ((needsAllPatients || needsVisitHistory) && !fullPatients) {
           const allP: Patient[] = [];
           let offset = 0;
           for (;;) {
@@ -166,7 +168,7 @@ export function AllPatientsModule({
           }
           if (!cancelled) setFullPatients(allP);
         }
-        if (!fullVisits) {
+        if (needsVisitHistory && !fullVisits) {
           const allV: VisitQueueItem[] = [];
           let offset = 0;
           for (;;) {
@@ -412,6 +414,8 @@ export function AllPatientsModule({
         key: 'lastVisit',
         header: 'Kunjungan Terakhir',
         format: (r) => {
+          const inlineVisit = (r as Patient & { _exportLastVisit?: string })._exportLastVisit;
+          if (inlineVisit) return inlineVisit;
           const st = patientStatsMap.get(r.id);
           return st?.lastVisitDate
             ? `${st.lastVisitDate.slice(0, 10)} · ${st.lastPoly || '-'}`
@@ -684,16 +688,21 @@ export function AllPatientsModule({
                 }
                 setFullPatients(allPatients);
                 setFullVisits(allVisits);
-                const statsByPatient = new Map<string, { visitDates: string[]; polyclinics: Set<string>; guarantors: Set<string> }>();
-                for (const v of allVisits) {
+                const sortedAllVisits = [...allVisits].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+                const statsByPatient = new Map<string, { lastVisitDate: string | null; lastPoly: string | null; visitDates: string[]; polyclinics: Set<string>; guarantors: Set<string> }>();
+                for (const v of sortedAllVisits) {
                   let st = statsByPatient.get(v.patientId);
                   if (!st) {
-                    st = { visitDates: [], polyclinics: new Set(), guarantors: new Set() };
+                    st = { lastVisitDate: null, lastPoly: null, visitDates: [], polyclinics: new Set(), guarantors: new Set() };
                     statsByPatient.set(v.patientId, st);
                   }
                   st.visitDates.push(localDateKey(v.createdAt));
                   st.polyclinics.add(v.polyclinic);
                   st.guarantors.add(v.guarantor);
+                  if (!st.lastVisitDate) {
+                    st.lastVisitDate = v.createdAt;
+                    st.lastPoly = v.polyclinic;
+                  }
                 }
                 const q = searchQuery.trim().toLowerCase();
                 const isDateWithinDays = (targetIsoDate: string, days: number) => {
@@ -738,6 +747,14 @@ export function AllPatientsModule({
                   }
                   if (visitFilter === 'BELUM_PERNAH' && visitDates.length > 0) return false;
                   return true;
+                }).map((p) => {
+                  const st = statsByPatient.get(p.id);
+                  return {
+                    ...p,
+                    _exportLastVisit: st?.lastVisitDate
+                      ? `${st.lastVisitDate.slice(0, 10)} · ${st.lastPoly || '-'}`
+                      : 'Belum pernah',
+                  } as Patient;
                 });
               }}
               compact

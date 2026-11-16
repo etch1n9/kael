@@ -76,8 +76,8 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
   const availableBedsCount = beds.filter((b) => b.status === 'TERSEDIA').length;
   const occupiedBedsCount = beds.filter((b) => b.status === 'TERISI').length;
 
-  const pendingPharmacy = pharmacyOrders.filter((po) => po.status !== 'DISERAHKAN').length;
-  const pendingLab = labOrders.filter((lo) => lo.status !== 'SELESAI_VERIFIKASI').length;
+  const pendingPharmacy = pharmacyOrders.filter((po) => po.status !== 'DISERAHKAN' && po.status !== 'BATAL').length;
+  const pendingLab = labOrders.filter((lo) => lo.status !== 'SELESAI_VERIFIKASI' && lo.status !== 'BATAL').length;
 
   const totalRevenue = accountingEntries
     .filter((a) => a.type === 'PENDAPATAN')
@@ -99,11 +99,11 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
       if (statusFilter !== 'ALL' && v.status !== statusFilter) return false;
       if (!q) return true;
       return (
-        v.patientName.toLowerCase().includes(q) ||
-        v.mrNumber.toLowerCase().includes(q) ||
-        v.queueNumber.toLowerCase().includes(q) ||
-        v.doctorName.toLowerCase().includes(q) ||
-        v.chiefComplaint.toLowerCase().includes(q)
+        (v.patientName || '').toLowerCase().includes(q) ||
+        (v.mrNumber || '').toLowerCase().includes(q) ||
+        (v.queueNumber || '').toLowerCase().includes(q) ||
+        (v.doctorName || '').toLowerCase().includes(q) ||
+        (v.chiefComplaint || '').toLowerCase().includes(q)
       );
     });
   }, [visits, todayKey, queueSearch, poliFilter, statusFilter]);
@@ -270,7 +270,6 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                 <option value="DIPERIKSA_DOKTER">Diperiksa Dokter</option>
                 <option value="FARMASI_LAB">Di Apotek / Lab</option>
                 <option value="KASIR">Menunggu Kasir</option>
-                <option value="SELESAI">Selesai</option>
               </select>
             </div>
           </div>
@@ -312,7 +311,7 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                         {visit.patientName} · {visit.gender}
                       </div>
                       <div className="text-caption font-mono text-[#52736B] whitespace-nowrap">
-                        {visit.mrNumber} · NIK {visit.nik.slice(0, 6)}***
+                        {visit.mrNumber}{visit.nik ? ` · NIK ${visit.nik.slice(0, 6)}***` : ''}
                       </div>
                     </td>
                     <td className="py-2.5 px-3">
@@ -325,8 +324,9 @@ export const DashboardModule: React.FC<DashboardModuleProps> = ({
                     </td>
                     <td className="py-2.5 px-3 font-mono text-caption whitespace-nowrap">
                       <div className="text-[#0F2922] dark:text-white">
-                        TD {visit.vitals.systolic}/{visit.vitals.diastolic} · HR{' '}
-                        {visit.vitals.heartRate} · {visit.vitals.temperature}°C
+                        {visit.vitals
+                          ? `TD ${visit.vitals.systolic}/${visit.vitals.diastolic} · HR ${visit.vitals.heartRate} · ${visit.vitals.temperature}°C`
+                          : 'Data klinis terbatas'}
                       </div>
                       <div className="text-[#00897B] font-semibold">
                         {visit.triageLevel.replace(/_/g, ' ')}

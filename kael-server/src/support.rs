@@ -88,6 +88,11 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     }
     let timestamp = now();
     let invoice = alias(body, "invoicePbfNumber", "supplierInvoiceNo").trim();
+    if receive && invoice.is_empty() {
+        return Err(bad_request(
+            "Nomor faktur / referensi PBF wajib diisi saat penerimaan stok langsung.",
+        ));
+    }
     if receive && !invoice.is_empty() && array(&app.db, "purchaseOrders").iter().any(|order| {
         text(order, "facilityCode") == ctx.facility_code
             && text(order, "supplierInvoiceNo").eq_ignore_ascii_case(invoice)
@@ -249,6 +254,11 @@ fn radiology(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         })
         .cloned()
         .ok_or_else(|| not_found("Kunjungan pasien radiologi tidak ditemukan di fasilitas ini."))?;
+    if matches!(text(&visit, "status"), "BATAL" | "SELESAI") {
+        return Err(conflict(
+            "Order radiologi tidak dapat dibuat pada kunjungan yang sudah selesai atau dibatalkan.",
+        ));
+    }
     if text(body, "examName").trim().is_empty() || text(body, "modality").trim().is_empty() {
         return Err(bad_request(
             "Jenis dan modalitas pemeriksaan radiologi wajib diisi.",
@@ -304,6 +314,16 @@ fn radiology_verify(app: &mut App, ctx: &RequestContext, order_id: &str, body: &
     }
     if text(&order, "status") == "EXPERTISE_VERIFIED" {
         return Err(conflict("Hasil radiologi sudah diverifikasi dan tidak dapat ditimpa."));
+    }
+    let rad_visit_id = text(&order, "visitId");
+    if !rad_visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == rad_visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        })
+    {
+        return Err(conflict("Kunjungan pasien telah dibatalkan; hasil radiologi tidak dapat diverifikasi."));
     }
     let findings = alias(body, "findingsText", "findings").trim();
     let impression = alias(body, "impressionConclusion", "impression").trim();
@@ -393,16 +413,52 @@ fn referral(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     {
         return Err(bad_request("Fasilitas tujuan terdaftar tetapi sudah nonaktif."));
     }
-    let patient = array(&app.db, "patients")
-        .iter()
-        .find(|row| {
-            text(row, "facilityCode") == ctx.facility_code
-                && ((!text(body, "patientId").is_empty()
-                    && text(row, "id") == text(body, "patientId"))
-                    || (!text(body, "nik").is_empty() && text(row, "nik") == text(body, "nik")))
-        })
-        .cloned()
+    let requested_id = text(body, "patientId").trim();
+    let requested_nik = text(body, "nik").trim();
+    let requested_mr = text(body, "mrNumber").trim();
+    let requested_name = text(body, "patientName").trim();
+    let by_id = if !requested_id.is_empty() {
+        Some(
+            array(&app.db, "patients")
+                .iter()
+                .find(|row| {
+                    text(row, "facilityCode") == ctx.facility_code
+                        && text(row, "id") == requested_id
+                })
+                .cloned()
+                .ok_or_else(|| not_found("Pasien rujukan tidak ditemukan di fasilitas ini."))?,
+        )
+    } else {
+        None
+    };
+    let by_nik = if !requested_nik.is_empty() {
+        Some(
+            array(&app.db, "patients")
+                .iter()
+                .find(|row| {
+                    text(row, "facilityCode") == ctx.facility_code
+                        && text(row, "nik") == requested_nik
+                })
+                .cloned()
+                .ok_or_else(|| not_found("Pasien rujukan dengan NIK tersebut tidak ditemukan di fasilitas ini."))?,
+        )
+    } else {
+        None
+    };
+    if let (Some(p_id), Some(p_nik)) = (&by_id, &by_nik) {
+        if text(p_id, "id") != text(p_nik, "id") {
+            return Err(conflict("ID pasien dan NIK rujukan menunjuk ke pasien yang berbeda."));
+        }
+    }
+    let patient = by_id
+        .or(by_nik)
         .ok_or_else(|| not_found("Pasien rujukan tidak ditemukan di fasilitas ini."))?;
+    if !requested_mr.is_empty() && !text(&patient, "mrNumber").eq_ignore_ascii_case(requested_mr) {
+        return Err(conflict("Nomor RM tidak cocok dengan pasien rujukan yang dipilih."));
+    }
+    if !requested_name.is_empty() && !text(&patient, "fullName").eq_ignore_ascii_case(requested_name) {
+        return Err(conflict("Nama pasien tidak cocok dengan pasien rujukan yang dipilih."));
+    }
     let facility = array(&app.db, "facilities")
         .iter()
         .find(|row| text(row, "code") == ctx.facility_code)
@@ -477,7 +533,13 @@ fn evidence(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if !allowed.contains(&kind.as_str()) || text(body, "documentNumber").trim().is_empty() || chrono::NaiveDate::parse_from_str(&valid_until, "%Y-%m-%d").is_err() {
         return Err(bad_request("Jenis bukti, nomor dokumen, dan tanggal berlaku YYYY-MM-DD wajib valid."));
     }
-    let record = json!({"id":id("evd"),"facilityCode":ctx.facility_code,"evidenceType":kind,"documentNumber":text(body,"documentNumber").trim(),"referenceNumber":text(body,"documentNumber").trim(),"subjectName":text(body,"holderName").trim(),"holderOrVendorName":text(body,"holderName").trim(),"validUntil":valid_until,"verificationStatus":"VERIFIED_ACTIVE","verifiedBy":text(&ctx.user,"username"),"createdAt":now()});
+    let today = crate::domain::business_date(chrono::Utc::now());
+    let verification_status = if valid_until.as_str() < today.as_str() {
+        "EXPIRED"
+    } else {
+        "VERIFIED_ACTIVE"
+    };
+    let record = json!({"id":id("evd"),"facilityCode":ctx.facility_code,"evidenceType":kind,"documentNumber":text(body,"documentNumber").trim(),"referenceNumber":text(body,"documentNumber").trim(),"subjectName":text(body,"holderName").trim(),"holderOrVendorName":text(body,"holderName").trim(),"validUntil":valid_until,"verificationStatus":verification_status,"verifiedBy":text(&ctx.user,"username"),"createdAt":now()});
     array_mut(&mut app.db, "evidenceRegistry").push(record.clone());
     audit(app, ctx, "EVIDENCE_REGISTERED", text(&record, "documentNumber"), &format!("Bukti {kind} dicatat."));
     save(app)?;
@@ -486,10 +548,41 @@ fn evidence(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
 
 fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     require_service(app, ctx, &["BEDAH_IBS"], &["SUB_SURGERY_IBS"])?;
-    if text(body, "procedureName").trim().is_empty() || text(body, "scheduledStart").trim().is_empty() {
-        return Err(bad_request("Nama tindakan dan jadwal operasi wajib diisi."));
+    let proc_name = text(body, "procedureName").trim();
+    let sched_start = text(body, "scheduledStart").trim();
+    let room_code = text(body, "operatingRoomCode").trim();
+    if proc_name.is_empty() || sched_start.is_empty() || room_code.is_empty() {
+        return Err(bad_request("Nama tindakan, kamar operasi, dan jadwal operasi wajib diisi."));
     }
-    let record = json!({"id":id("ibs"),"facilityCode":ctx.facility_code,"patientId":text(body,"patientId"),"patientName":text(body,"patientName").trim(),"mrNumber":text(body,"mrNumber").trim(),"procedureName":text(body,"procedureName").trim(),"icd9CmCode":text(body,"icd9CmCode").trim(),"operatingRoomCode":text(body,"operatingRoomCode").trim(),"surgeonName":text(body,"surgeonName").trim(),"anesthesiologistName":text(body,"anesthesiologistName").trim(),"scheduledStart":text(body,"scheduledStart").trim(),"status":"SCHEDULED","whoSignInCompleted":false,"whoTimeOutCompleted":false,"whoSignOutCompleted":false,"createdAt":now()});
+    let req_pid = text(body, "patientId").trim();
+    let req_mr = text(body, "mrNumber").trim();
+    let req_name = text(body, "patientName").trim();
+    let matched_patient = array(&app.db, "patients")
+        .iter()
+        .find(|p| {
+            text(p, "facilityCode") == ctx.facility_code
+                && ((!req_pid.is_empty() && text(p, "id") == req_pid)
+                    || (req_pid.is_empty()
+                        && !req_mr.is_empty()
+                        && text(p, "mrNumber").eq_ignore_ascii_case(req_mr)))
+        })
+        .cloned()
+        .ok_or_else(|| not_found("Pasien jadwal operasi harus terdaftar pada MPI fasilitas ini."))?;
+    if !req_mr.is_empty() && !text(&matched_patient, "mrNumber").eq_ignore_ascii_case(req_mr) {
+        return Err(conflict("Nomor RM tidak sesuai dengan pasien operasi yang dipilih."));
+    }
+    if !req_name.is_empty() && !text(&matched_patient, "fullName").eq_ignore_ascii_case(req_name) {
+        return Err(conflict("Nama pasien tidak sesuai dengan pasien operasi yang dipilih."));
+    }
+    if array(&app.db, "surgicalSchedules").iter().any(|s| {
+        text(s, "facilityCode") == ctx.facility_code
+            && text(s, "operatingRoomCode").eq_ignore_ascii_case(room_code)
+            && text(s, "scheduledStart") == sched_start
+            && text(s, "status") != "CANCELLED"
+    }) {
+        return Err(conflict("Kamar operasi sudah terjadwal pada waktu mulai tersebut."));
+    }
+    let record = json!({"id":id("ibs"),"facilityCode":ctx.facility_code,"patientId":matched_patient["id"],"patientName":matched_patient["fullName"],"mrNumber":matched_patient["mrNumber"],"procedureName":proc_name,"icd9CmCode":text(body,"icd9CmCode").trim(),"operatingRoomCode":room_code,"surgeonName":text(body,"surgeonName").trim(),"anesthesiologistName":text(body,"anesthesiologistName").trim(),"scheduledStart":sched_start,"status":"SCHEDULED","whoSignInCompleted":false,"whoTimeOutCompleted":false,"whoSignOutCompleted":false,"createdAt":now()});
     array_mut(&mut app.db, "surgicalSchedules").push(record.clone());
     audit(app, ctx, "SURGERY_SCHEDULED", text(&record, "id"), &format!("Jadwal {}.", text(&record, "procedureName")));
     save(app)?;
@@ -559,7 +652,22 @@ fn staff_record(app: &mut App, ctx: &RequestContext, body: &Value, collection: &
     if amount < 0.0 {
         return Err(bad_request("Nominal tidak boleh negatif."));
     }
-    let record = json!({"id":id("sdm"),"facilityCode":ctx.facility_code,"staffName":text(body,"staffName").trim(),"kind":action,"note":text(body,"note").trim().chars().take(4000).collect::<String>(),"amount":amount,"status":status,"date":text(body,"date").trim(),"createdAt":now(),"createdBy":text(&ctx.user,"username")});
+    let staff_name = text(body, "staffName").trim();
+    let date_val = text(body, "date").trim();
+    let note_val = text(body, "note").trim().chars().take(4000).collect::<String>();
+    if collection == "payrollRuns" {
+        if let Some(existing) = array(&app.db, "payrollRuns").iter().find(|row| {
+            text(row, "facilityCode") == ctx.facility_code
+                && text(row, "staffName").eq_ignore_ascii_case(staff_name)
+                && text(row, "date") == date_val
+                && text(row, "note") == note_val
+                && n(row, "amount").round() == amount
+                && text(row, "status") == status
+        }).cloned() {
+            return json_response(200, existing);
+        }
+    }
+    let record = json!({"id":id("sdm"),"facilityCode":ctx.facility_code,"staffName":staff_name,"kind":action,"note":note_val,"amount":amount,"status":status,"date":date_val,"createdAt":now(),"createdBy":text(&ctx.user,"username")});
     array_mut(&mut app.db, collection).push(record.clone());
     if collection == "payrollRuns" && amount > 0.0 && status == "APPROVED" {
         let entry = crate::finance::accounting_entry(app, ctx, "5-2000", "Beban Gaji SDM", "PENGELUARAN", "GAJI_SDM", &format!("Penggajian {}", text(&record, "staffName")), amount, &text(&record, "id"));

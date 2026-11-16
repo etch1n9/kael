@@ -195,14 +195,34 @@ fn component_action(app: &mut App, ctx: &RequestContext, invoice_id: &str, body:
     let action = text(body, "action");
     let mut items = array(&invoice, "items").clone();
     let mut unpriced = array(&invoice, "unpricedItems").clone();
+    let mut cancelled = array(&invoice, "cancelledComponents").clone();
     let found = items.iter().any(|item| text(item, "id") == component_id)
         || unpriced.iter().any(|item| text(item, "id") == component_id || text(item, "key") == component_id);
     if !found {
         return Err(bad_request("Komponen tagihan tidak dikenal."));
     }
+    let reason = text(body, "reason").trim();
     let audit_action;
     match action {
         "cancel" => {
+            for item in &items {
+                if text(item, "id") == component_id {
+                    let mut entry = item.clone();
+                    entry["cancelledAt"] = json!(now());
+                    entry["cancelledBy"] = ctx.user["fullName"].clone();
+                    entry["reason"] = json!(if reason.is_empty() { "Pembatalan komponen kasir" } else { reason });
+                    cancelled.push(entry);
+                }
+            }
+            for item in &unpriced {
+                if text(item, "id") == component_id || text(item, "key") == component_id {
+                    let mut entry = item.clone();
+                    entry["cancelledAt"] = json!(now());
+                    entry["cancelledBy"] = ctx.user["fullName"].clone();
+                    entry["reason"] = json!(if reason.is_empty() { "Pembatalan komponen kasir" } else { reason });
+                    cancelled.push(entry);
+                }
+            }
             items.retain(|item| text(item, "id") != component_id);
             unpriced.retain(|item| text(item, "id") != component_id && text(item, "key") != component_id);
             audit_action = "CASHIER_COMPONENT_CANCEL";
@@ -226,7 +246,8 @@ fn component_action(app: &mut App, ctx: &RequestContext, invoice_id: &str, body:
     let discount = number(&invoice, "discountAmount");
     invoice["items"] = json!(items);
     invoice["unpricedItems"] = json!(unpriced);
-    invoice["pricingStatus"] = json!(if unpriced.is_empty() { "COMPLETE" } else { "PENDING" });
+    invoice["cancelledComponents"] = json!(cancelled);
+    invoice["pricingStatus"] = json!(if !unpriced.is_empty() || items.is_empty() { "PENDING" } else { "COMPLETE" });
     recalculate(&mut invoice, discount);
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     audit(app, ctx, audit_action, text(&invoice, "invoiceNumber"), &format!("Komponen {component_id} aksi {action}."));
@@ -256,6 +277,23 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
     )?;
     let index = invoice_index(app, ctx, invoice_id)?;
     let mut invoice = array(&app.db, "invoices")[index].clone();
+    if text(&invoice, "status") == "BATAL" {
+        return Err(conflict(
+            "Tagihan yang telah dibatalkan tidak dapat dilunasi atau diajukan klaim.",
+        ));
+    }
+    let inv_visit_id = text(&invoice, "visitId");
+    if !inv_visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == inv_visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        })
+    {
+        return Err(conflict(
+            "Kunjungan pasien telah dibatalkan; tagihan tidak dapat dilunasi.",
+        ));
+    }
     if matches!(text(&invoice, "status"), "LUNAS" | "KLAIM_DIAJUKAN") {
         let req_method = text(body, "paymentMethod");
         let req_discount = body.get("discountAmount").and_then(Value::as_f64);
@@ -267,6 +305,11 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
             ));
         }
         return json_response(200, invoice);
+    }
+    if array(&invoice, "items").is_empty() {
+        return Err(conflict(
+            "Tagihan tidak memiliki komponen layanan aktif untuk dilunasi.",
+        ));
     }
     if text(&invoice, "pricingStatus") != "COMPLETE" {
         return Err(conflict(
@@ -361,7 +404,9 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
         });
         if !orders_open {
             for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
-                text(v, "id") == visit_id && text(v, "facilityCode") == ctx.facility_code
+                text(v, "id") == visit_id
+                    && text(v, "facilityCode") == ctx.facility_code
+                    && text(v, "status") != "BATAL"
             }) {
                 visit["status"] = json!("SELESAI");
                 visit["updatedAt"] = json!(timestamp);
@@ -601,10 +646,14 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         ));
     }
     let bpjs = uses_bpjs(&invoice);
-    let amount = body["receivedAmount"]
+    let raw_amount = body["receivedAmount"]
         .as_f64()
         .filter(|amount| amount.is_finite() && *amount > 0.0)
         .ok_or_else(|| bad_request("Masukkan nominal penerimaan aktual yang lebih dari nol."))?;
+    let amount = raw_amount.round();
+    if amount <= 0.0 {
+        return Err(bad_request("Nominal penerimaan setelah pembulatan Rupiah harus lebih dari nol."));
+    }
     let reference = text(body, "paymentReference").trim();
     if reference.is_empty() {
         return Err(bad_request("Referensi pembayaran aktual wajib diisi."));
@@ -617,12 +666,18 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             "Referensi penerimaan ini sudah tercatat pada tagihan.",
         ));
     }
-    let received = number(&invoice, "totalReceivedAmount") + amount;
+    let net = (number(&invoice, "subtotal") - number(&invoice, "discountAmount")).max(0.0).round();
+    let prev_received = number(&invoice, "totalReceivedAmount").round();
+    let received = prev_received + amount;
     if !received.is_finite() {
         return Err(bad_request("Nominal kumulatif penerimaan tidak valid."));
     }
+    if received > net {
+        return Err(conflict(
+            "Nominal kumulatif penerimaan klaim melebihi nilai tagihan bersih.",
+        ));
+    }
     let timestamp = now();
-    let net = (number(&invoice, "subtotal") - number(&invoice, "discountAmount")).max(0.0);
     let final_settlement = body["final"] == true;
     let settled = received >= net || (final_settlement && received > 0.0);
     if final_settlement && received < net {

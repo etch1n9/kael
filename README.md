@@ -79,7 +79,7 @@ KAEL_CLIENT_ORIGINS=https://app.kael.instansi.id
 
 Daftar origin dapat dipisahkan koma dan harus berisi protokol, hostname, serta port bila diperlukan, tanpa path atau wildcard. Restart server setelah mengubah konfigurasinya.
 
-Pengaturan **Atur server** menerima origin lengkap, misalnya `http://192.168.1.20:1507` atau `https://api.instansi.id`. Client menambahkan `/api` secara internal. Tanpa konfigurasi build, alamat awal memakai hostname situs dan port `1507`; alamat dapat diubah manual. Tidak ada pencarian atau pemindaian endpoint otomatis. Sesi terikat pada tujuan API dan pergantian tujuan mengosongkan kata sandi yang sedang diketik.
+Pengaturan **Atur server** menerima origin lengkap, misalnya `http://192.168.1.20:1507` atau `https://api.instansi.id`. Client menambahkan `/api` secara internal. Tanpa konfigurasi build (`VITE_API_BASE_URL`), alamat awal memakai origin halaman saat ini (`window.location.origin`); alamat dapat diubah manual. Tidak ada pencarian atau pemindaian endpoint otomatis. Sesi terikat pada tujuan API dan pergantian tujuan mengosongkan kata sandi yang sedang diketik.
 
 Jika web dilayani KAEL dan mengakses API pada origin berbeda, izinkan tujuan itu melalui `KAEL_API_ORIGINS`; backend tujuan juga perlu mengizinkan origin client melalui `KAEL_CLIENT_ORIGINS`. Browser tetap dapat menerapkan kebijakan HTTPS dan izin akses jaringan lokal. Mengganti alamat pada UI tidak mengubah izin jaringan server.
 
@@ -114,9 +114,9 @@ Superuser dapat mengelola fasilitas, role, akun, serta konfigurasi layanan melal
 
 Fasilitas yang masih memiliki akun atau data operasional tidak dapat dihapus. Gunakan perubahan status fasilitas untuk menghentikan akses sambil mempertahankan riwayat. Role yang masih digunakan akun juga tidak dapat dihapus.
 
-SQLite menyimpan data operasional dalam transaksi dengan pemeriksaan revisi. Gunakan satu proses backend untuk satu file database. Sesi berakhir saat backend dimulai ulang.
+SQLite menyimpan data operasional dan sesi aktif dalam transaksi dengan pemeriksaan revisi. Gunakan satu proses backend untuk satu file database. Sesi aktif yang belum kedaluwarsa tetap bertahan saat backend dimulai ulang. Untuk pencadangan dan pemulihan penuh server, gunakan `kael-server backup <file.sqlite>` dan `kael-server restore <file.sqlite>`.
 
-Antrean BPJS, SATUSEHAT, dan IoMT menyimpan permintaan lokal; pengiriman ke provider membutuhkan konfigurasi integrasi tersendiri. Pengisian presensi, pengajuan cuti, dan pencairan gaji belum diaktifkan karena penyimpanan operasionalnya belum tersedia pada server. Direktori tenaga medis memakai akun database; pengaturan jadwal dan kuota praktik belum tersedia.
+Antrean BPJS, SATUSEHAT, dan IoMT menyimpan permintaan lokal; pengiriman ke provider membutuhkan konfigurasi integrasi tersendiri. Catatan kehadiran, pengajuan cuti, dan penggajian SDM tersimpan di SQLite (dengan posting jurnal beban gaji untuk penggajian berstatus disetujui). Direktori tenaga medis memakai akun database; pengaturan jadwal dan kuota praktik belum tersedia.
 
 Indikator keuangan dan pelayanan hanya dihitung dari data yang tersimpan. Jika saldo awal, periode penilaian, populasi peserta, atau sumber perhitungan lain belum tersedia, antarmuka menampilkan keterangan belum tersedia. Stok bank darah, sterilisasi, sarana, serta layanan klinis yang belum memiliki alur pencatatan lengkap tidak ditampilkan sebagai hasil pemeriksaan atau transaksi yang sudah dilakukan.
 

@@ -180,6 +180,9 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
     ''
   );
   const [radImpression, setRadImpression] = useState('');
+  const [verifyingRadId, setVerifyingRadId] = useState<string | null>(null);
+  const [verifyRadFindings, setVerifyRadFindings] = useState('');
+  const [verifyRadImpression, setVerifyRadImpression] = useState('');
 
   const mutations: MedicationStockMutation[] = useMemo(
     () => workspace.medicationMutations || [],
@@ -2496,6 +2499,78 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
                   </div>
                   <div className="text-[#52736B]">{ro.findings}</div>
                   <div className="font-semibold text-[#00897B]">Kesan: {ro.impression}</div>
+                  {ro.status === 'ORDERED' && (
+                    <div className="pt-2">
+                      {verifyingRadId === ro.id ? (
+                        <form
+                          className="space-y-2 pt-2 border-t border-[#E2ECE8] dark:border-[#183831]"
+                          onSubmit={async (e) => {
+                            e.preventDefault();
+                            setFeedback(null);
+                            try {
+                              const verified = await kaelApi.verifyRadiologyOrder(token, facilityCode, ro.id, {
+                                findingsText: verifyRadFindings,
+                                impressionConclusion: verifyRadImpression,
+                              });
+                              setVerifyingRadId(null);
+                              setVerifyRadFindings('');
+                              setVerifyRadImpression('');
+                              await onRefreshWorkspace();
+                              setFeedback({
+                                type: 'success',
+                                text: `Hasil radiologi ${verified.accessionNumber} berhasil diverifikasi.`,
+                              });
+                            } catch (err) {
+                              setFeedback({
+                                type: 'error',
+                                text: err instanceof Error ? err.message : 'Gagal memverifikasi hasil radiologi.',
+                              });
+                            }
+                          }}
+                        >
+                          <textarea
+                            rows={2}
+                            required
+                            value={verifyRadFindings}
+                            onChange={(e) => setVerifyRadFindings(e.target.value)}
+                            placeholder="Temuan ekspertise radiolog..."
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
+                          />
+                          <input
+                            type="text"
+                            value={verifyRadImpression}
+                            onChange={(e) => setVerifyRadImpression(e.target.value)}
+                            placeholder="Kesan / kesimpulan..."
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] bg-[#F8FBFA] dark:bg-[#071714]"
+                          />
+                          <div className="flex items-center gap-2">
+                            <button type="submit" className="px-3 py-1.5 rounded-lg bg-[#00897B] text-white font-semibold cursor-pointer">
+                              Simpan Verifikasi
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setVerifyingRadId(null)}
+                              className="px-3 py-1.5 rounded-lg border border-[#D5E3DF] dark:border-[#1E473F] cursor-pointer"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setVerifyingRadId(ro.id);
+                            setVerifyRadFindings(ro.findings || '');
+                            setVerifyRadImpression(ro.impression || '');
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-[#00897B] text-white font-semibold cursor-pointer"
+                        >
+                          Isi &amp; Verifikasi Hasil
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
               {radiologyPage.bar}

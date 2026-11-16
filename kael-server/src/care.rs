@@ -330,6 +330,28 @@ fn vitals(body: &Value) -> Result<Value, ApiError> {
     {
         return Err(bad_request("Skor GCS dan skala nyeri tidak valid."));
     }
+    let sys = n(value, "systolic");
+    let dia = n(value, "diastolic");
+    let hr = n(value, "heartRate");
+    let rr = n(value, "respiratoryRate");
+    let temp = n(value, "temperature");
+    let spo2 = n(value, "spo2");
+    let wt = n(value, "weightKg");
+    let ht = n(value, "heightCm");
+    if !(30.0..=300.0).contains(&sys)
+        || !(15.0..=200.0).contains(&dia)
+        || dia >= sys
+        || !(15.0..=300.0).contains(&hr)
+        || !(4.0..=80.0).contains(&rr)
+        || !(25.0..=45.0).contains(&temp)
+        || !(30.0..=100.0).contains(&spo2)
+        || !(0.3..=400.0).contains(&wt)
+        || !(20.0..=260.0).contains(&ht)
+    {
+        return Err(bad_request(
+            "Nilai fisiologis tanda vital di luar batas wajar klinis (periksa TD, nadi, napas, suhu, SpO2 <= 100%, berat, dan tinggi badan).",
+        ));
+    }
     Ok(value.clone())
 }
 
@@ -575,6 +597,32 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
     if matches!(previous, "SELESAI" | "BATAL") && status != previous {
         return Err(conflict("Kunjungan yang sudah selesai atau batal tidak dapat diubah mundur."));
     }
+    if status == "SELESAI" {
+        if text(&visit, "soapId").trim().is_empty()
+            && !array(&app.db, "soapRecords").iter().any(|row| {
+                text(row, "visitId") == visit_id && text(row, "facilityCode") == ctx.facility_code
+            })
+        {
+            return Err(conflict(
+                "Kunjungan belum dapat diselesaikan karena rekam medis SOAP belum ditandatangani.",
+            ));
+        }
+        let open_orders = ["labOrders", "pharmacyOrders", "radiologyOrders"].iter().any(|key| {
+            array(&app.db, key).iter().any(|row| {
+                text(row, "visitId") == visit_id
+                    && text(row, "facilityCode") == ctx.facility_code
+                    && !matches!(
+                        text(row, "status"),
+                        "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED" | "BATAL" | ""
+                    )
+            })
+        });
+        if open_orders {
+            return Err(conflict(
+                "Kunjungan masih memiliki order penunjang (farmasi/lab/radiologi) yang belum diselesaikan.",
+            ));
+        }
+    }
     if status == "BATAL" {
         for key in ["invoices", "pharmacyOrders", "labOrders", "radiologyOrders"] {
             for row in array_mut(&mut app.db, key) {
@@ -698,15 +746,13 @@ fn bill_occupied_bed(app: &mut App, ctx: &RequestContext, bed: &Value) {
     let bed_visit_id = text(bed, "visitId");
     let matched = if !bed_visit_id.is_empty() {
         array(&app.db, "visits").iter().find(|visit| {
-            text(visit, "facilityCode") == ctx.facility_code && text(visit, "id") == bed_visit_id
+            text(visit, "facilityCode") == ctx.facility_code
+                && text(visit, "id") == bed_visit_id
+                && !matches!(text(visit, "status"), "SELESAI" | "BATAL")
         }).cloned()
     } else {
         None
-    }.or_else(|| {
-        array(&app.db, "visits").iter().rev().find(|visit| {
-            text(visit, "facilityCode") == ctx.facility_code && text(visit, "patientId") == patient_id
-        }).cloned()
-    });
+    };
     let guarantor = matched.as_ref().map(|visit| text(visit, "guarantor").to_owned()).unwrap_or_else(|| "UMUM".into());
     let settlement = matched.as_ref().map(|visit| text(visit, "guarantorSettlement").to_owned()).filter(|value| value == "BPJS").unwrap_or_else(|| "PATIENT".into());
     let visit_id = matched.as_ref().map(|visit| text(visit, "id").to_owned()).unwrap_or_default();
@@ -932,6 +978,11 @@ fn create_lab(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         "Kunjungan pasien tidak ditemukan.",
     )?;
     let visit = array(&app.db, "visits")[vi].clone();
+    if matches!(text(&visit, "status"), "BATAL" | "SELESAI") {
+        return Err(conflict(
+            "Order laboratorium tidak dapat dibuat pada kunjungan yang sudah selesai atau dibatalkan.",
+        ));
+    }
     let codes = array(body, "panelCodes");
     if codes.is_empty() || codes.len() > 200 {
         return Err(bad_request("Pilih parameter pemeriksaan laboratorium, maksimal 200."));
@@ -974,8 +1025,21 @@ fn verify_lab(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value)
         "Order laboratorium tidak ditemukan.",
     )?;
     let mut order = array(&app.db, "labOrders")[i].clone();
+    if text(&order, "status") == "BATAL" {
+        return Err(conflict("Order laboratorium yang telah dibatalkan tidak dapat diverifikasi."));
+    }
     if text(&order, "status") == "SELESAI_VERIFIKASI" {
         return Err(conflict("Hasil laboratorium yang sudah diverifikasi tidak dapat ditimpa. Ajukan koreksi sebagai revisi terpisah."));
+    }
+    let visit_id = text(&order, "visitId");
+    if !visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        })
+    {
+        return Err(conflict("Kunjungan pasien telah dibatalkan; hasil laboratorium tidak dapat diverifikasi."));
     }
     for parameter in array_mut(&mut order, "parameters") {
         let incoming = array(body, "parameters")
@@ -1125,8 +1189,8 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         "Data kunjungan pasien tidak ditemukan.",
     )?;
     let mut visit = array(&app.db, "visits")[vi].clone();
-    if matches!(text(&visit, "status"), "BATAL" | "SELESAI") {
-        return Err(conflict("Kunjungan yang batal atau selesai tidak dapat ditandatangani ulang."));
+    if text(&visit, "status") == "BATAL" {
+        return Err(conflict("Kunjungan yang batal tidak dapat ditandatangani ulang."));
     }
     if !is_practitioner(app, &ctx.user, &ctx.facility_code) {
         return Err(forbidden("Hanya tenaga pemeriksa yang tercatat yang dapat menandatangani rekam medis."));
@@ -1210,21 +1274,20 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                 conflict(message)
             }
         })?;
+    if existing.is_none() && text(&visit, "status") == "SELESAI" {
+        return Err(conflict("Kunjungan yang sudah selesai tidak dapat dibuatkan rekam medis SOAP baru."));
+    }
     let ii = array(&app.db, "invoices").iter().position(|row| {
         text(row, "visitId") == text(&visit, "id") && text(row, "facilityCode") == ctx.facility_code
     });
     let prior_invoice = ii.map(|i| array(&app.db, "invoices")[i].clone());
-    if let Some(invoice) = &prior_invoice {
-        if text(invoice, "status") != "BELUM_LUNAS"
-            && existing
-                .as_ref()
-                .map(|old| old["plan"] != record["plan"])
-                .unwrap_or(false)
-        {
-            return Err(conflict(
-                "Rencana layanan pada tagihan yang telah diselesaikan tidak dapat diubah melalui pembaruan SOAP.",
-            ));
-        }
+    if (text(&visit, "status") == "SELESAI"
+        || prior_invoice.as_ref().is_some_and(|inv| text(inv, "status") != "BELUM_LUNAS"))
+        && existing.as_ref().is_some_and(|old| old["plan"] != record["plan"])
+    {
+        return Err(conflict(
+            "Rencana layanan pada kunjungan atau tagihan yang telah diselesaikan tidak dapat diubah melalui pembaruan SOAP.",
+        ));
     }
     if let Some(old) = &existing {
         let mut revision = old.clone();
@@ -1246,6 +1309,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         array_mut(&mut app.db, "soapRecords").push(record.clone());
     }
     if text(&record, "recordStatus") == "ADDENDUM_APPENDED"
+        || text(&visit, "status") == "SELESAI"
         || prior_invoice
             .as_ref()
             .map(|invoice| text(invoice, "status") != "BELUM_LUNAS")
@@ -1346,8 +1410,14 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                      price: &Value|
      -> Result<(), ApiError> {
         handled_keys.insert(key.to_owned());
+        let prior_match = prior_items.iter().find(|item| {
+            text(item, "key") == key
+                || (category == "TINDAKAN"
+                    && text(item, "category") == "TINDAKAN"
+                    && text(item, "description") == description)
+        });
         if price.is_null() {
-            if let Some(existing_item) = prior_items.iter().find(|item| text(item, "key") == key) {
+            if let Some(existing_item) = prior_match {
                 let unit_price = n(existing_item, "unitPrice").round();
                 items.push(json!({
                     "id": existing_item["id"].clone(),
@@ -1365,7 +1435,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             .as_f64()
             .filter(|number| number.is_finite() && *number >= 0.0)
         {
-            let reused = prior_items.iter().find(|item| text(item, "key") == key).map(|item| item["id"].clone());
+            let reused = prior_match.map(|item| item["id"].clone());
             items.push(json!({"id":reused.unwrap_or_else(|| json!(id("bli"))),"key":key,"category":category,"description":description,"quantity":quantity,"unitPrice":tariff.round(),"subtotal":(quantity*tariff.round()).round()}));
         } else {
             return Err(bad_request(
@@ -1389,14 +1459,20 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         &body["pricing"]["consultationFee"],
     )?;
     for (index, procedure) in procedures.iter().enumerate() {
+        let proc_code = text(procedure, "icd9Code").trim();
+        let proc_name = text(procedure, "name").trim();
+        let stable_key = if !proc_code.is_empty() {
+            format!("procedure-{proc_code}")
+        } else if !proc_name.is_empty() {
+            format!("procedure-{}", proc_name.to_lowercase().replace(' ', "-"))
+        } else {
+            format!("procedure-{index}")
+        };
+        let desc = format!("{proc_code} - {proc_name}");
         quote(
-            &format!("procedure-{index}"),
+            &stable_key,
             "TINDAKAN",
-            format!(
-                "{} - {}",
-                text(procedure, "icd9Code"),
-                text(procedure, "name")
-            ),
+            desc,
             1.0,
             &procedure["tariff"],
         )?;

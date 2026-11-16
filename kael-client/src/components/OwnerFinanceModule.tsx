@@ -109,16 +109,33 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
       computeErpCompleteFinancialAnalysis({
         accountingEntries: rawEntries,
         invoices: rawInvoices,
-        medications: workspace.medications || [],
-        mutations: workspace.medicationMutations || [],
-        purchaseOrders: workspace.purchaseOrders || [],
-        visits: workspace.visits || [],
-        doubleEntryJournals: workspace.doubleEntryJournals || [],
+        medications:
+          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.medications
+            ? workspace.multiFacilityFinance.medications
+            : workspace.medications || [],
+        mutations:
+          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.medicationMutations
+            ? workspace.multiFacilityFinance.medicationMutations
+            : workspace.medicationMutations || [],
+        purchaseOrders:
+          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.purchaseOrders
+            ? workspace.multiFacilityFinance.purchaseOrders
+            : workspace.purchaseOrders || [],
+        visits:
+          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.visits
+            ? workspace.multiFacilityFinance.visits
+            : workspace.visits || [],
+        doubleEntryJournals:
+          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.doubleEntryJournals
+            ? workspace.multiFacilityFinance.doubleEntryJournals
+            : workspace.doubleEntryJournals || [],
         nearExpiryThresholdDays: workspace.activeFacilityConfig?.pharmacyPolicy.nearExpiryThresholdDays,
       }),
     [
+      scopeMode,
       rawEntries,
       rawInvoices,
+      workspace.multiFacilityFinance,
       workspace.medications,
       workspace.medicationMutations,
       workspace.purchaseOrders,

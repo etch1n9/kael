@@ -1149,8 +1149,8 @@ export function computeErpCompleteFinancialAnalysis(params: {
   const referenceMs = Date.parse(`${referenceDate}T00:00:00.000Z`);
   const recordedEntries = params.accountingEntries.filter((entry) => Number.isFinite(entry.amount));
   const totalRevenue = recordedEntries.filter((entry) => entry.type === 'PENDAPATAN').reduce((sum, entry) => sum + entry.amount, 0);
-  const recordedMedicalFees = recordedEntries.filter((entry) => entry.type === 'PENGELUARAN' && entry.category === 'JASA_MEDIS').reduce((sum, entry) => sum + entry.amount, 0);
-  const operatingExpenses = recordedEntries.filter((entry) => entry.type === 'PENGELUARAN' && !['PENGADAAN_OBAT', 'JASA_MEDIS'].includes(entry.category)).reduce((sum, entry) => sum + entry.amount, 0);
+  const recordedMedicalFees = recordedEntries.filter((entry) => (entry.type === 'PENGELUARAN' || entry.type === 'BEBAN') && entry.category === 'JASA_MEDIS').reduce((sum, entry) => sum + entry.amount, 0);
+  const operatingExpenses = recordedEntries.filter((entry) => (entry.type === 'PENGELUARAN' || entry.type === 'BEBAN') && !['PENGADAAN_OBAT', 'PERSEDIAAN', 'HPP_FARMASI', 'JASA_MEDIS'].includes(entry.category) && entry.accountCode !== '5-1400').reduce((sum, entry) => sum + entry.amount, 0);
   let totalAssetHnaRp = 0;
   let totalPotentialSalesHjaRp = 0;
   let nearExpiryBatchesCount = 0;
@@ -1200,14 +1200,29 @@ export function computeErpCompleteFinancialAnalysis(params: {
   const totalRealHospitalTariffRp = claims.reduce((sum, invoice) => sum + (recordedNonnegative(invoice.subtotal) ?? 0), 0);
   const totalPackageTariffRp = hasPackageValues ? claims.reduce((sum, invoice) => sum + invoice.inacbgOrIdrgTariffAmount!, 0) : null;
   const mutations = params.medicationMutations || params.mutations || [];
-  const hppPharmacyCogs = mutations.reduce((sum, mutation) => {
+  const cogsFromEntries = recordedEntries
+    .filter((entry) => entry.accountCode === '5-1400' || entry.category === 'HPP_FARMASI')
+    .reduce((sum, entry) => sum + entry.amount, 0);
+  const buyPriceByMedId = new Map<string, number>();
+  for (const med of params.medications) {
+    if (Number.isFinite(med.buyPrice) && med.buyPrice >= 0) {
+      buyPriceByMedId.set(med.id, med.buyPrice);
+      buyPriceByMedId.set(med.code, med.buyPrice);
+    }
+  }
+  const cogsFromMutations = mutations.reduce((sum, mutation) => {
     const qty = mutation.quantityChange;
-    const price = mutation.unitPrice || 0;
+    const hnaPrice =
+      buyPriceByMedId.get(mutation.medicationId) ??
+      buyPriceByMedId.get(mutation.medicationCode) ??
+      mutation.unitPrice ??
+      0;
     const outbound = mutation.type === 'KELUAR_RESEP' || mutation.type === 'RETUR_PBF' || (mutation.type === 'PENYESUAIAN_OPNAME' && typeof qty === 'number' && qty < 0);
-    if (!outbound || !Number.isFinite(price)) return sum;
+    if (!outbound || !Number.isFinite(hnaPrice)) return sum;
     const units = typeof qty === 'number' ? Math.abs(qty) : 0;
-    return sum + units * price;
+    return sum + units * hnaPrice;
   }, 0);
+  const hppPharmacyCogs = cogsFromEntries > 0 ? cogsFromEntries : cogsFromMutations;
   const grossProfit = totalRevenue - hppPharmacyCogs - recordedMedicalFees;
   const grossMarginPct = recordedRatio(grossProfit, totalRevenue);
   const journals = (params as { doubleEntryJournals?: { debitAccount?: string; creditAccount?: string; amount?: number; lines?: { accountCode?: string; debit?: number; credit?: number }[] }[] }).doubleEntryJournals;

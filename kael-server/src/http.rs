@@ -897,7 +897,7 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
             .map(|entry| text(entry, "code"))
             .filter(|code| allows(app, user, code, "KEUANGAN_OWNER"))
             .collect();
-        for key in ["accountingEntries", "invoices", "visits"] {
+        for key in ["accountingEntries", "invoices", "visits", "medications", "medicationMutations", "purchaseOrders", "doubleEntryJournals"] {
             result["multiFacilityFinance"][key] = json!(present(
                 array(&app.db, key)
                     .iter()
@@ -959,6 +959,17 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
                 }
             }
         }
+        if let Some(multi) = result.get_mut("multiFacilityFinance").and_then(Value::as_object_mut) {
+            if let Some(rows) = multi.get_mut("visits").and_then(Value::as_array_mut) {
+                for row in rows {
+                    if let Some(object) = row.as_object_mut() {
+                        for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals", "chiefComplaint"] {
+                            object.remove(field);
+                        }
+                    }
+                }
+            }
+        }
     }
     if let Some(rows) = result.get_mut("referrals").and_then(Value::as_array_mut) {
         for row in rows {
@@ -1011,14 +1022,24 @@ fn search_records(app: &App, context: &RequestContext, query: &str) -> Value {
         }
         present(rows, 30)
     };
-    json!({
-        "patients": find("patients", patient_access, &["fullName", "mrNumber", "nik", "phone", "bpjsNumber"]),
-        "visits": find("visits", visit_access, &["patientName", "mrNumber", "nik", "queueNumber", "registrationNumber"]),
-        "invoices": find("invoices", finance, &["patientName", "mrNumber", "invoiceNumber"]),
-        "pharmacyOrders": find("pharmacyOrders", has_any(&["APOTEK", "RME_DOKTER"]), &["patientName", "mrNumber"]),
-        "labOrders": find("labOrders", has_any(&["LABORATORIUM", "RME_DOKTER"]), &["patientName", "mrNumber", "specimenCode"]),
-        "radiologyOrders": find("radiologyOrders", has_any(&["RADIOLOGI_RIS", "RME_DOKTER"]), &["patientName", "mrNumber", "examName", "accessionNumber"])
-    })
+        let patient_fields: &[&str] = if redact {
+            &["fullName", "mrNumber"]
+        } else {
+            &["fullName", "mrNumber", "nik", "phone", "bpjsNumber"]
+        };
+        let visit_fields: &[&str] = if redact {
+            &["patientName", "mrNumber", "queueNumber", "registrationNumber"]
+        } else {
+            &["patientName", "mrNumber", "nik", "queueNumber", "registrationNumber"]
+        };
+        json!({
+            "patients": find("patients", patient_access, patient_fields),
+            "visits": find("visits", visit_access, visit_fields),
+            "invoices": find("invoices", finance, &["patientName", "mrNumber", "invoiceNumber"]),
+            "pharmacyOrders": find("pharmacyOrders", has_any(&["APOTEK", "RME_DOKTER"]), &["patientName", "mrNumber"]),
+            "labOrders": find("labOrders", has_any(&["LABORATORIUM", "RME_DOKTER"]), &["patientName", "mrNumber", "specimenCode"]),
+            "radiologyOrders": find("radiologyOrders", has_any(&["RADIOLOGI_RIS", "RME_DOKTER"]), &["patientName", "mrNumber", "examName", "accessionNumber"])
+        })
 }
 
 fn record_page(app: &App, context: &RequestContext, query: &str) -> ApiResult {
@@ -1059,11 +1080,20 @@ fn record_page(app: &App, context: &RequestContext, query: &str) -> ApiResult {
     if !allowed {
         return Err(forbidden("Tidak memiliki akses ke koleksi ini."));
     }
-    let mut rows: Vec<Value> = array(&app.db, &collection)
-        .iter()
-        .filter(|entry| text(entry, "facilityCode") == code)
-        .cloned()
-        .collect();
+    let (mut rows, total) = match app.store.query_page(&collection, code, offset, limit) {
+        Ok((db_rows, db_total)) if db_total > 0 || array(&app.db, &collection).is_empty() => (db_rows, db_total),
+        _ => {
+            let mut mem_rows: Vec<Value> = array(&app.db, &collection)
+                .iter()
+                .filter(|entry| text(entry, "facilityCode") == code)
+                .cloned()
+                .collect();
+            let mem_total = mem_rows.len();
+            mem_rows.sort_by(|left, right| stamp_of(right).cmp(&stamp_of(left)).then_with(|| text(right, "id").cmp(text(left, "id"))));
+            let sliced: Vec<Value> = mem_rows.into_iter().skip(offset).take(limit).collect();
+            (sliced, mem_total)
+        }
+    };
     let redact = !identity && has_any(&["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG"]);
     if redact && matches!(collection.as_str(), "patients" | "visits") {
         for row in &mut rows {
@@ -1074,9 +1104,6 @@ fn record_page(app: &App, context: &RequestContext, query: &str) -> ApiResult {
             }
         }
     }
-    let total = rows.len();
-    rows.sort_by(|left, right| stamp_of(right).cmp(&stamp_of(left)).then_with(|| text(right, "id").cmp(text(left, "id"))));
-    let rows: Vec<Value> = rows.into_iter().skip(offset).take(limit).collect();
     json_response(200, json!({"rows": rows, "total": total}))
 }
 
@@ -1133,6 +1160,14 @@ fn dispatch(
         }
         if let Some(object) = dump.as_object_mut() {
             object.remove("sessions");
+            object.insert(
+                "_exportMeta".into(),
+                json!({
+                    "exportType": "AUDIT_SNAPSHOT_JSON",
+                    "restorable": false,
+                    "note": "Ekspor JSON ini disanitasi (tanpa hash kredensial, sesi, dan sequence SQLite) untuk keperluan audit. Gunakan SQLite Online Backup ('kael-server backup <file>' / 'kael-server restore <file>') untuk pemulihan penuh server."
+                }),
+            );
         }
         return json_response(200, dump);
     }
@@ -1333,14 +1368,21 @@ pub async fn serve(State(state): State<Arc<Shared>>, request: Request) -> Respon
 }
 
 fn client_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("local")
-        .to_owned()
+    if std::env::var("KAEL_TRUST_PROXY")
+        .ok()
+        .is_some_and(|val| matches!(val.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+    {
+        if let Some(forwarded) = headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return forwarded.to_owned();
+        }
+    }
+    "local".to_owned()
 }
 
 async fn login_outside_lock(state: &Shared, body: &Value, ip: String) -> ApiResult {

@@ -27,8 +27,21 @@ async fn run() -> Result<(), String> {
     if command == "setup" || command == "--setup" {
         return bootstrap::run(&config);
     }
+    if command == "backup" || command == "--backup" {
+        let dest = std::env::args()
+            .nth(2)
+            .ok_or_else(|| "Gunakan: kael-server backup <path-tujuan.sqlite>".to_string())?;
+        let (store, _) = storage::Storage::load(&config.data_file)?;
+        return store.backup_to(std::path::Path::new(&dest));
+    }
+    if command == "restore" || command == "--restore" {
+        let src = std::env::args()
+            .nth(2)
+            .ok_or_else(|| "Gunakan: kael-server restore <path-sumber.sqlite>".to_string())?;
+        return storage::Storage::verify_and_restore(std::path::Path::new(&src), &config.data_file);
+    }
     if command != "serve" {
-        return Err("Perintah tersedia: serve, setup.".into());
+        return Err("Perintah tersedia: serve, setup, backup, restore.".into());
     }
     let (store, db) = storage::Storage::load(&config.data_file)?;
     if let Some(root) = &config.web_root {

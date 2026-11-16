@@ -26,8 +26,10 @@ export function SdmErpModule({
   onRefreshWorkspace,
   initialView = 'SDM_ERP',
 }: SdmErpModuleProps) {
+  const grantedModules = currentUser.resolvedModules || currentUser.customPrivileges || [];
+  const canPayroll = currentUser.role === 'SUPERUSER' || grantedModules.includes('SDM_ERP');
   const [activeTab, setActiveTab] = useState<SdmTab>(
-    initialView === 'SDM_JADWAL' ? 'ABSENSI' : 'PENGGAJIAN'
+    initialView === 'SDM_JADWAL' || !canPayroll ? 'ABSENSI' : 'PENGGAJIAN'
   );
   const [staffName, setStaffName] = useState(currentUser.fullName);
   const [note, setNote] = useState('');
@@ -36,18 +38,21 @@ export function SdmErpModule({
   const [leaveStatus, setLeaveStatus] = useState<'PENDING' | 'APPROVED' | 'REJECTED'>('PENDING');
   const [payrollStatus, setPayrollStatus] = useState<'PENDING' | 'APPROVED'>('PENDING');
   const [message, setMessage] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const tabs: { key: SdmTab; label: string; icon: typeof Clock }[] = [
     { key: 'ABSENSI', label: 'Absensi & shift', icon: Clock },
     { key: 'CUTI', label: 'Cuti & izin', icon: CalendarCheck },
-    { key: 'PENGGAJIAN', label: 'Penggajian', icon: Wallet },
+    ...(canPayroll ? [{ key: 'PENGGAJIAN' as SdmTab, label: 'Penggajian', icon: Wallet }] : []),
   ];
   const kind = activeTab === 'ABSENSI' ? 'attendance' : activeTab === 'CUTI' ? 'leave' : 'payroll';
   const rows = kind === 'attendance' ? workspace.attendance : kind === 'leave' ? workspace.leaveRequests : workspace.payrollRuns;
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (isSubmitting) return;
     setMessage('');
+    setIsSubmitting(true);
     try {
       await kaelApi.recordStaff(token, facilityCode, kind, {
         staffName: staffName.trim(),
@@ -62,6 +67,8 @@ export function SdmErpModule({
       setMessage('Catatan tersimpan.');
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Catatan belum tersimpan.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 

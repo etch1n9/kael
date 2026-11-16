@@ -618,7 +618,7 @@ export function calculateFinancialSummary(
       totalRevenue += entry.amount;
       revenueByCategory[entry.category] =
         (revenueByCategory[entry.category] || 0) + entry.amount;
-    } else {
+    } else if (entry.type === 'PENGELUARAN' || entry.type === 'BEBAN') {
       totalExpense += entry.amount;
       expenseByCategory[entry.category] =
         (expenseByCategory[entry.category] || 0) + entry.amount;
@@ -768,7 +768,7 @@ export function buildCashflowTimeSeries(
     const prev = byDate.get(dateKey) || { inflow: 0, outflow: 0 };
     if (entry.type === 'PENDAPATAN') {
       prev.inflow += entry.amount;
-    } else {
+    } else if (entry.type === 'PENGELUARAN' || entry.type === 'BEBAN') {
       prev.outflow += entry.amount;
     }
     byDate.set(dateKey, prev);

@@ -629,7 +629,7 @@ export interface PharmacyOrder {
   doctorName: string;
   allergies: string[];
   items: PrescriptionItem[];
-  status: 'ANTRIAN_RESEP' | 'DIRACIK' | 'DISERAHKAN_PARSIAL' | 'DISERAHKAN' | 'DIRETUR';
+  status: 'ANTRIAN_RESEP' | 'DIRACIK' | 'DISERAHKAN_PARSIAL' | 'DISERAHKAN' | 'DIRETUR' | 'BATAL';
   dispenseSequenceCount?: number;
   dispensedBatches: {
     medicationCode: string;
@@ -749,7 +749,7 @@ export interface LabOrder {
   doctorName: string;
   specimenCode: string;
   clinicalNotes: string;
-  status: 'PERMINTAAN_BARU' | 'SAMPEL_DIAMBIL' | 'SELESAI_VERIFIKASI';
+  status: 'PERMINTAAN_BARU' | 'SAMPEL_DIAMBIL' | 'SELESAI_VERIFIKASI' | 'BATAL';
   parameters: LabParameterResult[];
   verifiedBy?: string;
   verifiedAt?: string;
@@ -780,7 +780,7 @@ export interface RadiologyOrderRis {
   clinicalIndication: string;
   requestingDoctor?: string;
   radiologistName: string;
-  status: 'ORDERED' | 'IN_IMAGING' | 'EXPERTISE_VERIFIED';
+  status: 'ORDERED' | 'IN_IMAGING' | 'EXPERTISE_VERIFIED' | 'BATAL';
   findings?: string;
   findingsText?: string;
   impression?: string;
@@ -815,7 +815,8 @@ export interface SurgicalScheduleIbs {
     | 'SIGN_IN_VERIFIED'
     | 'TIME_OUT_INCISION'
     | 'SIGN_OUT_RECOVERY'
-    | 'COMPLETED';
+    | 'COMPLETED'
+    | 'CANCELLED';
   whoSafetyChecklist?: Record<string, boolean>;
   whoChecklist?: {
     signInIdentityAndConsentConfirmed: boolean;
@@ -937,12 +938,14 @@ export interface AccountingEntry {
   timestamp: string;
   accountCode: string;
   accountName: string;
-  type: 'PENDAPATAN' | 'PENGELUARAN';
+  type: 'PENDAPATAN' | 'PENGELUARAN' | 'ASET' | 'BEBAN' | 'LIABILITAS' | 'EKUITAS';
   category:
     | 'LAYANAN_MEDIS'
     | 'FARMASI'
     | 'KLAIM_BPJS'
     | 'PENGADAAN_OBAT'
+    | 'PERSEDIAAN'
+    | 'HPP_FARMASI'
     | 'OPERASIONAL'
     | 'JASA_MEDIS'
     | 'GAJI_SDM';

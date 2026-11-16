@@ -316,6 +316,9 @@ fn direct(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Value
     let visit_id = text(body, "visitId");
     if !visit_id.is_empty() {
         if let Some(visit) = array(&app.db, "visits").iter().find(|visit| text(visit, "id") == visit_id && text(visit, "facilityCode") == ctx.facility_code).cloned() {
+            if matches!(text(&visit, "status"), "BATAL" | "SELESAI") {
+                return Err(conflict("Kunjungan yang sudah selesai atau dibatalkan tidak dapat ditambahkan tagihan obat langsung."));
+            }
             append_service_charge(app, ctx, visit_id, text(&visit, "patientId"), text(&visit, "patientName"), text(&visit, "mrNumber"), text(&visit, "guarantor"), text(&visit, "guarantorSettlement"), "FARMASI", &format!("Obat langsung: {}", text(&med, "name")), quantity, n(&med, "sellPrice"));
         }
     }
@@ -345,6 +348,16 @@ fn dispense(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -
     }
     if text(&order, "status") == "BATAL" {
         return Err(conflict("Resep ini telah dibatalkan dan tidak dapat diserahkan."));
+    }
+    let visit_id = text(&order, "visitId");
+    if !visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        })
+    {
+        return Err(conflict("Kunjungan pasien telah dibatalkan; resep tidak dapat diserahkan."));
     }
     let mut dispensed = vec![];
     let mut total_cogs = 0.0;

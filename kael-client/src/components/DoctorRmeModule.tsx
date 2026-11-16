@@ -662,6 +662,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
                 setStatusBanner(null);
                 try {
                   await kaelApi.scheduleSurgery(token, facilityCode, {
+                    patientId: activeVisit.patientId,
                     procedureName: surgeryName,
                     scheduledStart: surgeryAt,
                     patientName: activeVisit.patientName,
@@ -690,19 +691,90 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
                 {(workspace.surgicalSchedules || []).map((ibs) => (
                   <div
                     key={ibs.id}
-                    className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 flex items-center justify-between gap-2"
+                    className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 space-y-2"
                   >
-                    <div>
-                      <div className="font-semibold text-slate-900 dark:text-slate-100">
-                        {ibs.procedureName} ({ibs.icd9CmCode})
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="font-semibold text-slate-900 dark:text-slate-100">
+                          {ibs.procedureName} ({ibs.icd9CmCode})
+                        </div>
+                        <div className="text-caption text-slate-500 font-mono">
+                          {ibs.operatingRoomCode} · Pasien: {ibs.patientName} · Bedah: {ibs.surgeonName} · Status: {ibs.status}
+                        </div>
                       </div>
-                      <div className="text-caption text-slate-500 font-mono">
-                        {ibs.operatingRoomCode} · Pasien: {ibs.patientName} · Bedah: {ibs.surgeonName}
-                      </div>
+                      <span className="px-2 py-0.5 rounded bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 font-mono text-caption font-bold">
+                        Sign-in: {ibs.whoSignInCompleted === true ? 'selesai' : 'belum'} · Time-out: {ibs.whoTimeOutCompleted === true ? 'selesai' : 'belum'} · Sign-out: {ibs.whoSignOutCompleted === true ? 'selesai' : 'belum'}
+                      </span>
                     </div>
-                    <span className="px-2 py-0.5 rounded bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 font-mono text-caption font-bold">
-                      Sign-in: {ibs.whoSignInCompleted === true ? 'tercatat selesai' : 'belum terverifikasi'} · Time-out: {ibs.whoTimeOutCompleted === true ? 'tercatat selesai' : 'belum terverifikasi'} · Sign-out: {ibs.whoSignOutCompleted === true ? 'tercatat selesai' : 'belum terverifikasi'}
-                    </span>
+                    {ibs.status !== 'COMPLETED' && ibs.status !== 'CANCELLED' && (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await kaelApi.updateSurgicalSchedule(token, facilityCode, ibs.id, {
+                                whoSignInCompleted: !ibs.whoSignInCompleted,
+                              });
+                              await onRefreshWorkspace();
+                            } catch (err) {
+                              setStatusBanner({ type: 'error', text: err instanceof Error ? err.message : 'Gagal memperbarui Sign-In.' });
+                            }
+                          }}
+                          className="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 text-caption font-semibold cursor-pointer"
+                        >
+                          {ibs.whoSignInCompleted ? '✓ Sign-In' : 'Verifikasi Sign-In'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await kaelApi.updateSurgicalSchedule(token, facilityCode, ibs.id, {
+                                whoTimeOutCompleted: !ibs.whoTimeOutCompleted,
+                              });
+                              await onRefreshWorkspace();
+                            } catch (err) {
+                              setStatusBanner({ type: 'error', text: err instanceof Error ? err.message : 'Gagal memperbarui Time-Out.' });
+                            }
+                          }}
+                          className="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 text-caption font-semibold cursor-pointer"
+                        >
+                          {ibs.whoTimeOutCompleted ? '✓ Time-Out' : 'Verifikasi Time-Out'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await kaelApi.updateSurgicalSchedule(token, facilityCode, ibs.id, {
+                                whoSignOutCompleted: !ibs.whoSignOutCompleted,
+                              });
+                              await onRefreshWorkspace();
+                            } catch (err) {
+                              setStatusBanner({ type: 'error', text: err instanceof Error ? err.message : 'Gagal memperbarui Sign-Out.' });
+                            }
+                          }}
+                          className="px-2 py-1 rounded border border-slate-300 dark:border-slate-700 text-caption font-semibold cursor-pointer"
+                        >
+                          {ibs.whoSignOutCompleted ? '✓ Sign-Out' : 'Verifikasi Sign-Out'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await kaelApi.updateSurgicalSchedule(token, facilityCode, ibs.id, {
+                                status: 'COMPLETED',
+                              });
+                              await onRefreshWorkspace();
+                              setStatusBanner({ type: 'success', text: `Operasi ${ibs.procedureName} ditandai selesai.` });
+                            } catch (err) {
+                              setStatusBanner({ type: 'error', text: err instanceof Error ? err.message : 'Gagal menyelesaikan jadwal operasi.' });
+                            }
+                          }}
+                          className="px-2.5 py-1 rounded bg-[#00897B] text-white text-caption font-semibold cursor-pointer"
+                        >
+                          Selesaikan Operasi
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

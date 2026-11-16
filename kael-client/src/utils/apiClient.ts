@@ -137,6 +137,10 @@ export interface WorkspacePayload {
     accountingEntries: AccountingEntry[];
     invoices: InvoiceRecord[];
     visits: VisitQueueItem[];
+    medications?: MedicationInventory[];
+    medicationMutations?: MedicationStockMutation[];
+    purchaseOrders?: PurchaseOrderPbf[];
+    doubleEntryJournals?: DoubleEntryJournal[];
   };
 }
 
@@ -766,7 +770,7 @@ export const kaelApi = {
   registerEvidence: (token: string, facilityCode: string, payload: { evidenceType: string; documentNumber: string; holderName: string; validUntil: string }) =>
     requestJson<Record<string, unknown>>('/evidence', { method: 'POST', body: JSON.stringify(payload) }, token, facilityCode),
 
-  scheduleSurgery: (token: string, facilityCode: string, payload: { procedureName: string; scheduledStart: string; patientName: string; mrNumber: string; operatingRoomCode: string; surgeonName: string; icd9CmCode?: string }) =>
+  scheduleSurgery: (token: string, facilityCode: string, payload: { patientId?: string; procedureName: string; scheduledStart: string; patientName: string; mrNumber: string; operatingRoomCode: string; surgeonName: string; icd9CmCode?: string }) =>
     requestJson<Record<string, unknown>>('/surgical-schedules', { method: 'POST', body: JSON.stringify(payload) }, token, facilityCode),
 
   updateSurgicalSchedule: (token: string, facilityCode: string, scheduleId: string, payload: { status?: string; whoSignInCompleted?: boolean; whoTimeOutCompleted?: boolean; whoSignOutCompleted?: boolean }) =>

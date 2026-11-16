@@ -1994,9 +1994,10 @@ export const SuperuserControlModule: React.FC<SuperuserControlModuleProps> = ({
                 <button
                   type="button"
                   onClick={handleExportFullBackupJson}
+                  title="Ekspor JSON untuk audit data (tanpa hash kredensial/sesi; gunakan SQLite Online Backup untuk pemulihan penuh)"
                   className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                 >
-                  Backup JSON Server
+                  Ekspor JSON Audit (Non-Restore)
                 </button>
               </div>
             </div>

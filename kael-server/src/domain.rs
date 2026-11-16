@@ -173,7 +173,13 @@ pub fn invoice_totals(items: &[Value], bpjs: bool, discount: f64) -> Value {
     let subtotal = rupiah(
         items
             .iter()
-            .map(|item| number(item, "quantity") * number(item, "unitPrice"))
+            .map(|item| {
+                item.get("subtotal")
+                    .and_then(Value::as_f64)
+                    .filter(|val| val.is_finite())
+                    .map(rupiah)
+                    .unwrap_or_else(|| rupiah(number(item, "quantity") * number(item, "unitPrice")))
+            })
             .sum(),
     );
     let discount = rupiah(discount.min(subtotal).max(0.0));
@@ -221,11 +227,20 @@ pub fn fefo(batches: &[Value], quantity: f64) -> Result<(Vec<Value>, Vec<Value>)
     if quantity <= 0.0 {
         return Ok((updated, allocations));
     }
+    let today = business_date(Utc::now());
     updated.sort_by(|left, right| text(left, "expiryDate").cmp(text(right, "expiryDate")));
     let mut remaining = quantity;
     for batch in &mut updated {
         if remaining <= 0.0 {
             break;
+        }
+        let exp = text(batch, "expiryDate").trim();
+        let status = text(batch, "status").trim();
+        if exp.is_empty()
+            || exp < today.as_str()
+            || matches!(status, "EXPIRED" | "QUARANTINED" | "RECALLED" | "INACTIVE")
+        {
+            continue;
         }
         let stock = number(batch, "stock");
         if stock <= 0.0 {
