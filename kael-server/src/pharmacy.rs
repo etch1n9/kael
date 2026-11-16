@@ -213,6 +213,28 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
             }
             return json_response(200, existing_idem["response"].clone());
         }
+        if let Some(existing_mut) = array(&app.db, "medicationMutations").iter().find(|m| {
+            text(m, "facilityCode") == ctx.facility_code
+                && text(m, "type") == "MASUK_PBF"
+                && (text(m, "idempotencyKey") == idem_key || text(m, "referenceId") == idem_key)
+        }) {
+            let stored_fp = text(existing_mut, "payloadFingerprint");
+            let matches = if !stored_fp.is_empty() {
+                stored_fp == payload_fingerprint
+            } else {
+                text(existing_mut, "medicationId") == medication_id
+                    && text(existing_mut, "batchNumber").eq_ignore_ascii_case(&batch)
+                    && (n(existing_mut, "quantityChange") - qty).abs() < 1e-6
+                    && (n(existing_mut, "unitPrice") - incoming_cost).abs() < 1e-6
+                    && text(existing_mut, "counterpartyOrPatient") == supplier
+            };
+            if !matches {
+                return Err(conflict(
+                    "Idempotency key sudah digunakan untuk penerimaan stok dengan data yang berbeda.",
+                ));
+            }
+            return json_response(200, med);
+        }
     }
     if !explicit_ref.is_empty() {
         if let Some(existing_mut) = array(&app.db, "medicationMutations").iter().find(|m| {
@@ -284,6 +306,12 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
         supplier,
         &notes,
     );
+    if !idem_key.is_empty() {
+        if let Some(last_mut) = array_mut(&mut app.db, "medicationMutations").last_mut() {
+            last_mut["idempotencyKey"] = json!(idem_key);
+            last_mut["payloadFingerprint"] = json!(payload_fingerprint);
+        }
+    }
     let cost = (qty * incoming_cost).round();
     inventory_receipt(app, ctx, cost, &notes, &receipt_ref);
     array_mut(&mut app.db, "medications")[index] = med.clone();
@@ -643,4 +671,100 @@ fn opname(
             json!({"updatedCount":updated,"mutationsCreated":updated})
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::storage::Storage;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn restock_idempotency_survives_retention_pruning_and_allows_distinct_entries() {
+        let root = std::env::temp_dir().join(format!("kael-pharm-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("test.sqlite");
+        let seed = json!({
+            "serverConfig": { "sessionTimeoutMinutes": 480 },
+            "users": [{ "id": "usr-1", "username": "apt", "fullName": "Apoteker", "role": "APOTEKER", "active": true }],
+            "facilities": [{ "code": "FAC1", "name": "RS Test", "type": "RSUD", "active": true }],
+            "roles": [{ "id": "APOTEKER", "active": true, "modules": ["APOTEK", "KATALOG_OPNAME", "MUTASI_STOK"] }],
+            "facilityConfigs": [{
+                "facilityCode": "FAC1",
+                "lifecycleStage": "ACTIVE",
+                "enabledSubCapabilities": ["SUB_PHARMACY_INVENTORY_OPNAME", "SUB_ACCOUNTING_DOUBLE_ENTRY"]
+            }],
+            "medications": [{
+                "id": "med-1",
+                "facilityCode": "FAC1",
+                "code": "OBT-1",
+                "name": "Paracetamol",
+                "genericName": "Paracetamol",
+                "category": "OBAT_BEBAS",
+                "form": "TABLET",
+                "unit": "TAB",
+                "minStock": 1,
+                "buyPrice": 1000,
+                "sellPrice": 1500,
+                "batches": [{ "batchNumber": "B1", "expiryDate": "2028-01-01", "stock": 10, "unitCost": 1000 }]
+            }],
+            "medicationMutations": [],
+            "accountingEntries": [],
+            "doubleEntryJournals": [],
+            "auditLogs": [],
+            "idempotencyRecords": []
+        });
+        Storage::create(&db_path, &seed).unwrap();
+        let (store, db) = Storage::load(&db_path).unwrap();
+        let mut app = App {
+            config: Config {
+                bind: "127.0.0.1".into(),
+                port: 0,
+                db_path: db_path.clone(),
+                web_root: None,
+                client_origins: vec![],
+            },
+            store,
+            db,
+            sessions: HashMap::new(),
+            sessions_digest: 1,
+            login_failures: HashMap::new(),
+        };
+        let ctx = RequestContext {
+            user: json!({ "id": "usr-1", "username": "apt", "fullName": "Apoteker", "role": "APOTEKER" }),
+            facility_code: "FAC1".into(),
+            token: "tok".into(),
+        };
+
+        let payload_a = json!({
+            "batchNumber": "B1",
+            "expiryDate": "2028-01-01",
+            "quantity": 3,
+            "supplierName": "PBF A",
+            "idempotencyKey": "key-A"
+        });
+        restock(&mut app, &ctx, "med-1", &payload_a).unwrap();
+        assert_eq!(app.db["medications"][0]["batches"][0]["stock"], json!(13.0));
+
+        // Simulate retention pruning clearing idempotencyRecords
+        app.db["idempotencyRecords"] = json!([]);
+
+        // Retry with key-A after retention pruning MUST remain idempotent (still 13.0)
+        restock(&mut app, &ctx, "med-1", &payload_a).unwrap();
+        assert_eq!(app.db["medications"][0]["batches"][0]["stock"], json!(13.0));
+
+        // New transaction with identical payload but new key-C MUST add +3 -> 16.0
+        let payload_c = json!({
+            "batchNumber": "B1",
+            "expiryDate": "2028-01-01",
+            "quantity": 3,
+            "supplierName": "PBF A",
+            "idempotencyKey": "key-C"
+        });
+        restock(&mut app, &ctx, "med-1", &payload_c).unwrap();
+        assert_eq!(app.db["medications"][0]["batches"][0]["stock"], json!(16.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

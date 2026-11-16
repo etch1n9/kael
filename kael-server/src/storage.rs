@@ -60,6 +60,10 @@ PRAGMA user_version = 2;
 
 impl Storage {
     pub fn load(path: &Path) -> Result<(Self, Value), String> {
+        let rollback_path = path.with_extension("sqlite.rollback");
+        if !path.exists() && rollback_path.is_file() {
+            let _ = fs::rename(&rollback_path, path);
+        }
         if !path.is_file() {
             return Err("Database KAEL belum tersedia. Jalankan perintah setup.".into());
         }
@@ -268,9 +272,9 @@ impl Storage {
             }
         }
         let parent = dest.parent().ok_or_else(|| "Lokasi tujuan backup tidak valid.".to_string())?;
-        ensure_private_dir(parent)?;
+        ensure_dir_exists(parent)?;
         let stage_dir = parent.join(format!(".kael-backup-stage-{}", uuid::Uuid::new_v4()));
-        ensure_private_dir(&stage_dir)?;
+        create_private_stage_dir(&stage_dir)?;
         let staging = stage_dir.join("snapshot.sqlite");
         let result = (|| -> Result<(), String> {
             let escaped = staging.to_string_lossy().replace('\'', "''");
@@ -307,11 +311,15 @@ impl Storage {
             }
         }
         let parent = target.parent().ok_or_else(|| "Lokasi target tidak valid.".to_string())?;
-        ensure_private_dir(parent)?;
+        ensure_dir_exists(parent)?;
         let (target_lock_file, target_lock_path) = claim_lock(target)?;
+        let rollback_path = target.with_extension("sqlite.rollback");
+        if !target.exists() && rollback_path.is_file() {
+            let _ = fs::rename(&rollback_path, target);
+        }
         let stage_dir = parent.join(format!(".kael-restore-stage-{}", uuid::Uuid::new_v4()));
         let result = (|| -> Result<(), String> {
-            ensure_private_dir(&stage_dir)?;
+            create_private_stage_dir(&stage_dir)?;
             let src_conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|error| format!("Berkas sumber tidak dapat dibuka: {error}"))?;
             let integrity: String = src_conn
@@ -335,18 +343,25 @@ impl Storage {
             let _ = fs::remove_file(format!("{}-shm", temp.display()));
             let _ = fs::remove_file(format!("{}-journal", temp.display()));
 
-            let rollback = stage_dir.join("rollback.sqlite");
             let had_target = target.exists();
             if had_target {
-                fs::rename(target, &rollback)
+                fs::rename(target, &rollback_path)
                     .map_err(|error| format!("Gagal mengamankan database lama sebelum pemulihan: {error}"))?;
+                let _ = fs::File::open(parent).and_then(|d| d.sync_all());
             }
             if let Err(error) = fs::rename(&temp, target) {
                 if had_target {
-                    let _ = fs::rename(&rollback, target);
+                    if let Err(rb_err) = fs::rename(&rollback_path, target) {
+                        return Err(format!(
+                            "Gagal memasang database hasil pemulihan ({error}) dan pemulihan rollback tertunda di {}: {rb_err}",
+                            rollback_path.display()
+                        ));
+                    }
                 }
                 return Err(format!("Gagal memasang database hasil pemulihan: {error}"));
             }
+            let _ = fs::File::open(parent).and_then(|d| d.sync_all());
+            let _ = fs::remove_file(&rollback_path);
             let _ = fs::remove_file(format!("{}-wal", target.display()));
             let _ = fs::remove_file(format!("{}-shm", target.display()));
             let _ = fs::remove_file(format!("{}-journal", target.display()));
@@ -416,7 +431,21 @@ impl Storage {
     }
 }
 
-fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+fn ensure_dir_exists(dir: &Path) -> Result<(), String> {
+    if dir.exists() {
+        return Ok(());
+    }
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory.create(dir).map_err(|error| error.to_string())
+}
+
+fn create_private_stage_dir(dir: &Path) -> Result<(), String> {
     let mut directory = fs::DirBuilder::new();
     directory.recursive(true);
     #[cfg(unix)]

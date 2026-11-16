@@ -99,57 +99,88 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
     return workspace.invoices;
   }, [scopeMode, workspace.invoices, workspace.multiFacilityFinance]);
 
+  const activeServerSummary =
+    scopeMode === 'ALL_OWNED'
+      ? workspace.multiFacilityFinance?.summary
+      : workspace.financeSummary;
+
   const summary = useMemo(() => {
-    const serverSummary =
-      scopeMode === 'ALL_OWNED'
-        ? workspace.multiFacilityFinance?.summary
-        : workspace.financeSummary;
-    if (serverSummary && (serverSummary.totalEntriesCount ?? 0) > rawEntries.length) {
-      return serverSummary;
+    if (
+      activeServerSummary &&
+      ((activeServerSummary.totalEntriesCount ?? 0) > rawEntries.length ||
+        (activeServerSummary.totalInvoicesCount ?? 0) > rawInvoices.length)
+    ) {
+      return activeServerSummary;
     }
     return calculateFinancialSummary(rawEntries, rawInvoices);
-  }, [scopeMode, workspace.financeSummary, workspace.multiFacilityFinance?.summary, rawEntries, rawInvoices]);
+  }, [activeServerSummary, rawEntries, rawInvoices]);
 
-  const erpAnalysis = useMemo(
-    () =>
-      computeErpCompleteFinancialAnalysis({
-        accountingEntries: rawEntries,
-        invoices: rawInvoices,
-        medications:
-          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.medications
-            ? workspace.multiFacilityFinance.medications
-            : workspace.medications || [],
-        mutations:
-          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.medicationMutations
-            ? workspace.multiFacilityFinance.medicationMutations
-            : workspace.medicationMutations || [],
-        purchaseOrders:
-          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.purchaseOrders
-            ? workspace.multiFacilityFinance.purchaseOrders
-            : workspace.purchaseOrders || [],
-        visits:
-          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.visits
-            ? workspace.multiFacilityFinance.visits
-            : workspace.visits || [],
-        doubleEntryJournals:
-          scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.doubleEntryJournals
-            ? workspace.multiFacilityFinance.doubleEntryJournals
-            : workspace.doubleEntryJournals || [],
-        nearExpiryThresholdDays: workspace.activeFacilityConfig?.pharmacyPolicy.nearExpiryThresholdDays,
-      }),
-    [
-      scopeMode,
-      rawEntries,
-      rawInvoices,
-      workspace.multiFacilityFinance,
-      workspace.medications,
-      workspace.medicationMutations,
-      workspace.purchaseOrders,
-      workspace.visits,
-      workspace.doubleEntryJournals,
-      workspace.activeFacilityConfig?.pharmacyPolicy.nearExpiryThresholdDays,
-    ]
-  );
+  const erpAnalysis = useMemo(() => {
+    const base = computeErpCompleteFinancialAnalysis({
+      accountingEntries: rawEntries,
+      invoices: rawInvoices,
+      medications:
+        scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.medications
+          ? workspace.multiFacilityFinance.medications
+          : workspace.medications || [],
+      mutations:
+        scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.medicationMutations
+          ? workspace.multiFacilityFinance.medicationMutations
+          : workspace.medicationMutations || [],
+      purchaseOrders:
+        scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.purchaseOrders
+          ? workspace.multiFacilityFinance.purchaseOrders
+          : workspace.purchaseOrders || [],
+      visits:
+        scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.visits
+          ? workspace.multiFacilityFinance.visits
+          : workspace.visits || [],
+      doubleEntryJournals:
+        scopeMode === 'ALL_OWNED' && workspace.multiFacilityFinance?.doubleEntryJournals
+          ? workspace.multiFacilityFinance.doubleEntryJournals
+          : workspace.doubleEntryJournals || [],
+      nearExpiryThresholdDays: workspace.activeFacilityConfig?.pharmacyPolicy.nearExpiryThresholdDays,
+    });
+    if (
+      activeServerSummary?.receivableAging &&
+      (activeServerSummary.totalInvoicesCount ?? 0) > rawInvoices.length
+    ) {
+      const totalRec = activeServerSummary.receivableAging.totalReceivables ?? (
+        activeServerSummary.receivableAging.bucket0to30 +
+        activeServerSummary.receivableAging.bucket31to60 +
+        activeServerSummary.receivableAging.bucket61to90 +
+        activeServerSummary.receivableAging.bucketOver90
+      );
+      return {
+        ...base,
+        balanceSheet: {
+          ...base.balanceSheet,
+          accountsReceivable: totalRec,
+          accountsReceivablePatientsAndJkn: totalRec,
+        },
+        receivableAging: {
+          ...base.receivableAging,
+          bucket0to30: activeServerSummary.receivableAging.bucket0to30,
+          bucket31to60: activeServerSummary.receivableAging.bucket31to60,
+          bucket61to90: activeServerSummary.receivableAging.bucket61to90,
+          bucketOver90: activeServerSummary.receivableAging.bucketOver90,
+        },
+      };
+    }
+    return base;
+  }, [
+    scopeMode,
+    activeServerSummary,
+    rawEntries,
+    rawInvoices,
+    workspace.multiFacilityFinance,
+    workspace.medications,
+    workspace.medicationMutations,
+    workspace.purchaseOrders,
+    workspace.visits,
+    workspace.doubleEntryJournals,
+    workspace.activeFacilityConfig?.pharmacyPolicy.nearExpiryThresholdDays,
+  ]);
 
   // 12-Day Cashflow Time Series for Single Main KPI Sparkline Chart
   const cashflowSeries = useMemo(

@@ -456,6 +456,25 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
             text(&invoice, "invoiceNumber"),
         );
         record_books(app, ctx, &entry);
+    } else if revenue > 0.0 {
+        let desc = format!(
+            "Pengakuan Piutang Klaim {} - {} ({})",
+            text(&invoice, "invoiceNumber"),
+            text(&invoice, "patientName"),
+            text(&invoice, "mrNumber")
+        );
+        balanced_journal_with_event(
+            app,
+            ctx,
+            "CLAIM_RECOGNIZED",
+            &desc,
+            text(&invoice, "invoiceNumber"),
+            "1-1200",
+            "Piutang Klaim JKN / Asuransi",
+            "4-1015",
+            "Pencairan Klaim JKN BPJS / Piutang Korporasi",
+            revenue,
+        );
     }
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     let visit_id = text(&invoice, "visitId").to_owned();
@@ -806,6 +825,12 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         "{} (Otorisasi Keuangan)",
         text(&ctx.user, "fullName")
     ));
+    let inv_num = text(&invoice, "invoiceNumber").to_owned();
+    let rec_desc = format!(
+        "Penerimaan klaim {} — {}",
+        inv_num,
+        text(&invoice, "patientName")
+    );
     let entry = accounting_entry(
         app,
         ctx,
@@ -813,20 +838,47 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         "Pencairan Klaim JKN BPJS / Piutang Korporasi",
         "PENDAPATAN",
         if bpjs { "KLAIM_BPJS" } else { "LAYANAN_MEDIS" },
-        &format!(
-            "Penerimaan klaim {} — {}",
-            text(&invoice, "invoiceNumber"),
-            text(&invoice, "patientName")
-        ),
+        &rec_desc,
         amount,
-        text(&invoice, "invoiceNumber"),
+        &inv_num,
     );
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
-    record_books(app, ctx, &entry);
+    let has_recognized = array(&app.db, "doubleEntryJournals").iter().any(|j| {
+        text(j, "facilityCode") == ctx.facility_code
+            && text(j, "sourceTransactionId") == inv_num
+            && text(j, "eventType") == "CLAIM_RECOGNIZED"
+    });
+    if !has_recognized && net > 0.0 {
+        balanced_journal_with_event(
+            app,
+            ctx,
+            "CLAIM_RECOGNIZED",
+            &format!("Pengakuan Piutang Klaim {} — {}", inv_num, text(&invoice, "patientName")),
+            &inv_num,
+            "1-1200",
+            "Piutang Klaim JKN / Asuransi",
+            "4-1015",
+            "Pencairan Klaim JKN BPJS / Piutang Korporasi",
+            net,
+        );
+    }
+    array_mut(&mut app.db, "accountingEntries").push(entry.clone());
+    balanced_journal_with_event(
+        app,
+        ctx,
+        "CLAIM_RECEIPT",
+        &rec_desc,
+        &inv_num,
+        "1-1100",
+        "Kas dan setara kas",
+        "1-1200",
+        "Piutang Klaim JKN / Asuransi",
+        amount,
+    );
     if writeoff_amount > 0.0 {
         let adj_desc = format!(
             "Penyesuaian selisih klaim final {} — {}",
-            text(&invoice, "invoiceNumber"),
+            inv_num,
             text(&invoice, "patientName")
         );
         let adj_entry = accounting_entry(
@@ -838,7 +890,7 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             "OPERASIONAL",
             &adj_desc,
             writeoff_amount,
-            text(&invoice, "invoiceNumber"),
+            &inv_num,
         );
         array_mut(&mut app.db, "accountingEntries").push(adj_entry);
         balanced_journal_with_event(
@@ -846,7 +898,7 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             ctx,
             "CLAIM_ADJUSTED",
             &adj_desc,
-            text(&invoice, "invoiceNumber"),
+            &inv_num,
             "5-1900",
             "Selisih / Penyesuaian Klaim JKN & Piutang",
             "1-1200",
@@ -892,16 +944,82 @@ fn resolve_cancelled_invoice(
     )?;
     let index = invoice_index(app, ctx, invoice_id)?;
     let mut invoice = array(&app.db, "invoices")[index].clone();
+    let action = text(body, "action").trim();
+    let reason = text(body, "reason").trim();
+    if reason.is_empty() {
+        return Err(bad_request("Alasan resolusi tagihan wajib diisi."));
+    }
+    let idem_key = text(body, "idempotencyKey").trim();
+    let reference_for_fp = text(body, "paymentReference").trim();
+    let refund_fp_val = body.get("refundAmount").and_then(Value::as_f64).map(|v| v.round()).unwrap_or(-1.0);
+    let op_fp = format!("{invoice_id}|{action}|{reference_for_fp}|{refund_fp_val}|{reason}");
+    if !idem_key.is_empty() {
+        if let Some(existing_idem) = array(&app.db, "idempotencyRecords").iter().find(|row| {
+            text(row, "key") == idem_key
+                && text(row, "facilityCode") == ctx.facility_code
+                && text(row, "action") == "INVOICE_RESOLVE_CANCELLED"
+        }) {
+            let stored_fp = text(existing_idem, "fingerprint");
+            if !stored_fp.is_empty() && stored_fp != op_fp {
+                return Err(conflict(
+                    "Idempotency key sudah digunakan untuk resolusi tagihan dengan data berbeda.",
+                ));
+            }
+            return json_response(200, existing_idem["response"].clone());
+        }
+    }
+    if action == "REFUND" {
+        let reference = text(body, "paymentReference").trim();
+        if reference.is_empty() {
+            return Err(bad_request("Referensi bukti pengembalian dana wajib diisi."));
+        }
+        let raw_refund = body
+            .get("refundAmount")
+            .filter(|v| v.is_number())
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .ok_or_else(|| {
+                bad_request("Nominal pengembalian dana wajib diisi berupa angka lebih dari nol.")
+            })?;
+        let refund_amount = raw_refund.round();
+        if refund_amount <= 0.0 {
+            return Err(bad_request("Nominal pengembalian dana setelah pembulatan harus lebih dari nol."));
+        }
+        if let Some(existing_receipt) = array(&invoice, "refundReceipts")
+            .iter()
+            .find(|r| text(r, "paymentReference") == reference)
+        {
+            if (number(existing_receipt, "amount").round() - refund_amount).abs() < 0.5
+                && text(existing_receipt, "reason") == reason
+            {
+                return json_response(200, invoice);
+            }
+            return Err(conflict(
+                "Referensi pengembalian dana ini sudah tercatat dengan nominal atau alasan berbeda.",
+            ));
+        }
+    }
+    let inv_visit_id = text(&invoice, "visitId");
+    let visit_cancelled = !inv_visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == inv_visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        });
+    let res_status = text(&invoice, "cancellationResolutionStatus");
+    if !visit_cancelled && !matches!(res_status, "NEEDS_RESOLUTION" | "CONTINUE_RECEIVABLE") {
+        return Err(conflict(
+            "Resolusi pembatalan hanya berlaku untuk tagihan dari kunjungan yang telah dibatalkan.",
+        ));
+    }
+    if matches!(res_status, "WRITEOFF_RESOLVED") {
+        return Err(conflict("Tagihan batal ini sudah diselesaikan melalui write-off."));
+    }
     let prev_received = number(&invoice, "totalReceivedAmount").round();
     if prev_received <= 0.0 || matches!(text(&invoice, "status"), "BATAL" | "LUNAS") {
         return Err(conflict(
             "Resolusi pembatalan hanya berlaku untuk tagihan aktif yang sudah menerima pembayaran sebagian.",
         ));
-    }
-    let action = text(body, "action").trim();
-    let reason = text(body, "reason").trim();
-    if reason.is_empty() {
-        return Err(bad_request("Alasan resolusi tagihan wajib diisi."));
     }
     let net = (number(&invoice, "subtotal") - number(&invoice, "discountAmount"))
         .max(0.0)
@@ -924,9 +1042,29 @@ fn resolve_cancelled_invoice(
             invoice["cancellationResolvedBy"] = ctx.user["id"].clone();
             invoice["cancellationResolvedAt"] = json!(timestamp);
             if writeoff > 0.0 {
+                let inv_num = text(&invoice, "invoiceNumber").to_owned();
+                let has_recognized = array(&app.db, "doubleEntryJournals").iter().any(|j| {
+                    text(j, "facilityCode") == ctx.facility_code
+                        && text(j, "sourceTransactionId") == inv_num
+                        && text(j, "eventType") == "CLAIM_RECOGNIZED"
+                });
+                if !has_recognized && net > 0.0 {
+                    balanced_journal_with_event(
+                        app,
+                        ctx,
+                        "CLAIM_RECOGNIZED",
+                        &format!("Pengakuan Piutang Klaim {} — {}", inv_num, text(&invoice, "patientName")),
+                        &inv_num,
+                        "1-1200",
+                        "Piutang Klaim JKN / Asuransi",
+                        "4-1015",
+                        "Pencairan Klaim JKN BPJS / Piutang Korporasi",
+                        net,
+                    );
+                }
                 let desc = format!(
                     "Penghapusan sisa piutang kunjungan batal {} — {}",
-                    text(&invoice, "invoiceNumber"),
+                    inv_num,
                     text(&invoice, "patientName")
                 );
                 let adj = accounting_entry(
@@ -938,7 +1076,7 @@ fn resolve_cancelled_invoice(
                     "OPERASIONAL",
                     &desc,
                     writeoff,
-                    text(&invoice, "invoiceNumber"),
+                    &inv_num,
                 );
                 array_mut(&mut app.db, "accountingEntries").push(adj);
                 balanced_journal_with_event(
@@ -946,7 +1084,7 @@ fn resolve_cancelled_invoice(
                     ctx,
                     "CLAIM_ADJUSTED",
                     &desc,
-                    text(&invoice, "invoiceNumber"),
+                    &inv_num,
                     "5-1900",
                     "Selisih / Penyesuaian Klaim JKN & Piutang",
                     "1-1200",
@@ -960,16 +1098,13 @@ fn resolve_cancelled_invoice(
                 .as_f64()
                 .filter(|v| v.is_finite() && *v > 0.0)
                 .map(|v| v.round())
-                .unwrap_or(prev_received);
+                .ok_or_else(|| bad_request("Nominal pengembalian dana tidak valid."))?;
             if refund_amount <= 0.0 || refund_amount > prev_received {
                 return Err(bad_request(
                     "Nominal pengembalian dana tidak boleh melebihi jumlah yang telah diterima.",
                 ));
             }
             let reference = text(body, "paymentReference").trim();
-            if reference.is_empty() {
-                return Err(bad_request("Referensi bukti pengembalian dana wajib diisi."));
-            }
             let remaining_received = (prev_received - refund_amount).max(0.0).round();
             invoice["totalReceivedAmount"] = json!(remaining_received);
             if remaining_received == 0.0 {
@@ -1019,6 +1154,18 @@ fn resolve_cancelled_invoice(
         _ => return Err(bad_request("Aksi resolusi pembatalan tidak valid.")),
     }
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
+    if !idem_key.is_empty() {
+        array_mut(&mut app.db, "idempotencyRecords").push(json!({
+            "id": id("idem"),
+            "idempotencyKey": idem_key,
+            "key": idem_key,
+            "facilityCode": ctx.facility_code,
+            "action": "INVOICE_RESOLVE_CANCELLED",
+            "fingerprint": op_fp,
+            "response": invoice,
+            "createdAt": timestamp
+        }));
+    }
     audit(
         app,
         ctx,
@@ -1028,4 +1175,158 @@ fn resolve_cancelled_invoice(
     );
     save(app)?;
     json_response(200, invoice)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::storage::Storage;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn test_app() -> (App, RequestContext, PathBuf) {
+        let root = std::env::temp_dir().join(format!("kael-fin-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("test.sqlite");
+        let seed = json!({
+            "serverConfig": { "sessionTimeoutMinutes": 480 },
+            "users": [{ "id": "usr-1", "username": "fin", "fullName": "Finance Staff", "role": "ADMIN_KEUANGAN", "active": true }],
+            "facilities": [{ "code": "FAC1", "name": "RS Test", "type": "RSUD", "active": true }],
+            "roles": [{ "id": "ADMIN_KEUANGAN", "active": true, "modules": ["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG"] }],
+            "facilityConfigs": [{
+                "facilityCode": "FAC1",
+                "lifecycleStage": "ACTIVE",
+                "enabledSubCapabilities": ["SUB_CASHIER_BILLING_DEPOSIT", "SUB_ACCOUNTING_DOUBLE_ENTRY"]
+            }],
+            "patients": [{ "id": "pat-1", "facilityCode": "FAC1", "fullName": "Pasien Uji", "mrNumber": "RM-000001" }],
+            "visits": [{ "id": "vis-1", "facilityCode": "FAC1", "patientId": "pat-1", "status": "KASIR", "soapId": "soap-1" }],
+            "soapRecords": [{ "id": "soap-1", "facilityCode": "FAC1", "visitId": "vis-1" }],
+            "invoices": [{
+                "id": "inv-1",
+                "facilityCode": "FAC1",
+                "invoiceNumber": "INV/FAC1/20261117/0001",
+                "visitId": "vis-1",
+                "patientId": "pat-1",
+                "patientName": "Pasien Uji",
+                "mrNumber": "RM-000001",
+                "guarantor": "BPJS_KESEHATAN",
+                "guarantorSettlement": "BPJS",
+                "items": [{ "id": "bli-1", "key": "consultation", "category": "KONSULTASI", "description": "Konsultasi", "quantity": 1, "unitPrice": 100000, "subtotal": 100000 }],
+                "unpricedItems": [],
+                "pricingStatus": "COMPLETE",
+                "subtotal": 100000,
+                "discountAmount": 0,
+                "bpjsCoveredAmount": 100000,
+                "patientPayableAmount": 0,
+                "status": "BELUM_LUNAS"
+            }],
+            "accountingEntries": [],
+            "doubleEntryJournals": [],
+            "auditLogs": [],
+            "idempotencyRecords": []
+        });
+        Storage::create(&db_path, &seed).unwrap();
+        let (store, db) = Storage::load(&db_path).unwrap();
+        let app = App {
+            config: Config {
+                bind: "127.0.0.1".into(),
+                port: 0,
+                db_path: db_path.clone(),
+                web_root: None,
+                client_origins: vec![],
+            },
+            store,
+            db,
+            sessions: HashMap::new(),
+            sessions_digest: 1,
+            login_failures: HashMap::new(),
+        };
+        let ctx = RequestContext {
+            user: json!({ "id": "usr-1", "username": "fin", "fullName": "Finance Staff", "role": "ADMIN_KEUANGAN" }),
+            facility_code: "FAC1".into(),
+            token: "tok".into(),
+        };
+        (app, ctx, root)
+    }
+
+    fn account_balance(app: &App, code: &str) -> f64 {
+        let mut bal = 0.0;
+        for j in array(&app.db, "doubleEntryJournals") {
+            for line in array(j, "lines") {
+                if text(line, "accountCode") == code {
+                    bal += number(line, "debit") - number(line, "credit");
+                }
+            }
+        }
+        bal
+    }
+
+    #[test]
+    fn claim_final_writeoff_balances_cash_and_receivable_gl() {
+        let (mut app, ctx, root) = test_app();
+        pay(&mut app, &ctx, "inv-1", &json!({ "paymentMethod": "KLAIM_BPJS" })).unwrap();
+        assert_eq!(account_balance(&app, "1-1200"), 100000.0);
+        assert_eq!(account_balance(&app, "1-1100"), 0.0);
+
+        reconcile(
+            &mut app,
+            &ctx,
+            &json!({
+                "invoiceId": "inv-1",
+                "receivedAmount": 30000,
+                "paymentReference": "REF-JKN-1",
+                "final": true
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(account_balance(&app, "1-1100"), 30000.0);
+        assert_eq!(account_balance(&app, "1-1200"), 0.0);
+        assert_eq!(account_balance(&app, "5-1900"), 70000.0);
+        assert_eq!(account_balance(&app, "4-1015"), -100000.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cancelled_invoice_partial_refund_is_idempotent_and_validates_amount() {
+        let (mut app, ctx, root) = test_app();
+        pay(&mut app, &ctx, "inv-1", &json!({ "paymentMethod": "KLAIM_BPJS" })).unwrap();
+        reconcile(
+            &mut app,
+            &ctx,
+            &json!({ "invoiceId": "inv-1", "receivedAmount": 50000, "paymentReference": "REF-1" }),
+        )
+        .unwrap();
+        array_mut(&mut app.db, "visits")[0]["status"] = json!("BATAL");
+        array_mut(&mut app.db, "invoices")[0]["cancellationResolutionStatus"] = json!("NEEDS_RESOLUTION");
+
+        assert!(resolve_cancelled_invoice(&mut app, &ctx, "inv-1", &json!({
+            "action": "REFUND", "reason": "Batal", "paymentReference": "RF-0"
+        })).is_err());
+        assert!(resolve_cancelled_invoice(&mut app, &ctx, "inv-1", &json!({
+            "action": "REFUND", "reason": "Batal", "paymentReference": "RF-0", "refundAmount": "10000"
+        })).is_err());
+        assert!(resolve_cancelled_invoice(&mut app, &ctx, "inv-1", &json!({
+            "action": "REFUND", "reason": "Batal", "paymentReference": "RF-0", "refundAmount": 0
+        })).is_err());
+
+        let r1 = resolve_cancelled_invoice(&mut app, &ctx, "inv-1", &json!({
+            "action": "REFUND", "reason": "Koreksi batal", "paymentReference": "RF-10K", "refundAmount": 10000
+        })).unwrap();
+        assert_eq!(r1.body.as_ref().unwrap()["totalReceivedAmount"], json!(40000.0));
+
+        let r2 = resolve_cancelled_invoice(&mut app, &ctx, "inv-1", &json!({
+            "action": "REFUND", "reason": "Koreksi batal", "paymentReference": "RF-10K", "refundAmount": 10000
+        })).unwrap();
+        assert_eq!(r2.body.as_ref().unwrap()["totalReceivedAmount"], json!(40000.0));
+        assert_eq!(array(&app.db["invoices"][0], "refundReceipts").len(), 1);
+        let refund_journals = array(&app.db, "doubleEntryJournals")
+            .iter()
+            .filter(|j| text(j, "eventType") == "REFUND_APPROVED")
+            .count();
+        assert_eq!(refund_journals, 1);
+        assert_eq!(account_balance(&app, "1-1100"), 40000.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -108,6 +108,13 @@ export interface WorkspaceFinanceSummary {
   unpaidPatientReceivables: number;
   revenueByCategory: Record<string, number>;
   expenseByCategory: Record<string, number>;
+  receivableAging?: {
+    bucket0to30: number;
+    bucket31to60: number;
+    bucket61to90: number;
+    bucketOver90: number;
+    totalReceivables?: number;
+  };
   totalEntriesCount?: number;
   totalInvoicesCount?: number;
 }

@@ -897,6 +897,8 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
         let mut pending_bpjs = 0.0_f64;
         let mut unpaid_patient = 0.0_f64;
         let mut invoices_count = 0usize;
+        let mut aging_buckets = [0.0_f64; 4];
+        let ref_date = Utc::now().date_naive();
         for inv in array(&app.db, "invoices") {
             let fac = text(inv, "facilityCode");
             if !facility_codes.contains(&fac) || !in_window(inv, from, to) {
@@ -907,7 +909,10 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
                 continue;
             }
             let st = text(inv, "status");
-            if !matches!(st, "KLAIM_DIAJUKAN" | "BELUM_LUNAS") {
+            if !matches!(
+                st,
+                "BELUM_LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_PENDING_DISPUTE" | "KLAIM_DISETUJUI"
+            ) {
                 continue;
             }
             let net = (inv["subtotal"].as_f64().unwrap_or(0.0)
@@ -929,8 +934,26 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
             let outstanding = (obligation - received - adjustment).round().max(0.0);
             if st == "KLAIM_DIAJUKAN" {
                 pending_bpjs += outstanding;
-            } else {
+            } else if st == "BELUM_LUNAS" {
                 unpaid_patient += outstanding;
+            }
+            if outstanding > 0.0 {
+                let created_str = text(inv, "createdAt");
+                let age_days = created_str
+                    .get(..10)
+                    .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+                    .map(|d| (ref_date - d).num_days().max(0))
+                    .unwrap_or(0);
+                let idx = if age_days <= 30 {
+                    0
+                } else if age_days <= 60 {
+                    1
+                } else if age_days <= 90 {
+                    2
+                } else {
+                    3
+                };
+                aging_buckets[idx] += outstanding;
             }
         }
         let net_profit = total_revenue - total_expense;
@@ -948,6 +971,13 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
             "unpaidPatientReceivables": unpaid_patient,
             "revenueByCategory": rev_by_cat,
             "expenseByCategory": exp_by_cat,
+            "receivableAging": {
+                "bucket0to30": aging_buckets[0],
+                "bucket31to60": aging_buckets[1],
+                "bucket61to90": aging_buckets[2],
+                "bucketOver90": aging_buckets[3],
+                "totalReceivables": aging_buckets.iter().sum::<f64>(),
+            },
             "totalEntriesCount": entries_count,
             "totalInvoicesCount": invoices_count,
         })
