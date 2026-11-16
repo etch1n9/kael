@@ -99,6 +99,19 @@ export interface StoredSession {
   apiBaseUrl?: string;
 }
 
+export interface WorkspaceFinanceSummary {
+  totalRevenue: number;
+  totalExpense: number;
+  netProfit: number;
+  profitMarginPercent: number;
+  pendingBpjsClaims: number;
+  unpaidPatientReceivables: number;
+  revenueByCategory: Record<string, number>;
+  expenseByCategory: Record<string, number>;
+  totalEntriesCount?: number;
+  totalInvoicesCount?: number;
+}
+
 export interface WorkspacePayload {
   dataAccess?: Record<string, boolean>;
   user: UserAccount;
@@ -133,6 +146,7 @@ export interface WorkspacePayload {
   allFacilities: Facility[];
   roles: RoleDefinition[];
   serverConfig: ServerConfig;
+  financeSummary?: WorkspaceFinanceSummary;
   multiFacilityFinance?: {
     accountingEntries: AccountingEntry[];
     invoices: InvoiceRecord[];
@@ -141,6 +155,7 @@ export interface WorkspacePayload {
     medicationMutations?: MedicationStockMutation[];
     purchaseOrders?: PurchaseOrderPbf[];
     doubleEntryJournals?: DoubleEntryJournal[];
+    summary?: WorkspaceFinanceSummary;
   };
 }
 
@@ -420,6 +435,8 @@ export const kaelApi = {
       expiryDate: string;
       quantity: number;
       supplierName?: string;
+      idempotencyKey?: string;
+      referenceId?: string;
     }
   ) =>
     requestJson<MedicationInventory>(

@@ -5,9 +5,12 @@ use std::{
     fs::{self, OpenOptions},
     hash::{Hash, Hasher},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
     time::Duration,
 };
+
+static IN_PROCESS_LOCKS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 type FingerprintMap = HashMap<String, HashMap<String, u64>>;
 
@@ -24,6 +27,9 @@ impl Drop for Storage {
         if let Some(file) = self.lock_file.take() {
             drop(file);
             let _ = fs::remove_file(&self.lock_path);
+            if let Ok(mut active) = IN_PROCESS_LOCKS.lock() {
+                active.remove(&self.lock_path);
+            }
         }
     }
 }
@@ -262,54 +268,33 @@ impl Storage {
             }
         }
         let parent = dest.parent().ok_or_else(|| "Lokasi tujuan backup tidak valid.".to_string())?;
-        let mut directory = fs::DirBuilder::new();
-        directory.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            directory.mode(0o700);
-        }
-        directory.create(parent).map_err(|error| error.to_string())?;
-        let staging = parent.join(format!(".kael-backup-{}.tmp", uuid::Uuid::new_v4()));
-        let escaped = staging.to_string_lossy().replace('\'', "''");
-        if let Err(error) = self.connection.execute(&format!("VACUUM INTO '{escaped}'"), []) {
-            let _ = fs::remove_file(&staging);
-            return Err(error.to_string());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&staging, fs::Permissions::from_mode(0o600));
-        }
-        let check = Connection::open_with_flags(&staging, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|error| error.to_string())
-            .and_then(|dst_conn| {
-                dst_conn
-                    .pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))
-                    .map_err(|error| error.to_string())
-            });
-        match check {
-            Ok(res) if res == "ok" => {
-                if let Err(error) = fs::rename(&staging, dest) {
-                    let _ = fs::remove_file(&staging);
-                    return Err(format!("Gagal mempublikasikan berkas cadangan: {error}"));
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(dest, fs::Permissions::from_mode(0o600));
-                }
-                Ok(())
+        ensure_private_dir(parent)?;
+        let stage_dir = parent.join(format!(".kael-backup-stage-{}", uuid::Uuid::new_v4()));
+        ensure_private_dir(&stage_dir)?;
+        let staging = stage_dir.join("snapshot.sqlite");
+        let result = (|| -> Result<(), String> {
+            let escaped = staging.to_string_lossy().replace('\'', "''");
+            self.connection
+                .execute(&format!("VACUUM INTO '{escaped}'"), [])
+                .map_err(|error| error.to_string())?;
+            set_private_file_permissions(&staging)?;
+            let dst_conn = Connection::open_with_flags(&staging, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| error.to_string())?;
+            let integrity: String = dst_conn
+                .pragma_query_value(None, "integrity_check", |row| row.get(0))
+                .map_err(|error| error.to_string())?;
+            if integrity != "ok" {
+                return Err(format!("Integritas salinan database tidak valid: {integrity}"));
             }
-            Ok(res) => {
-                let _ = fs::remove_file(&staging);
-                Err(format!("Integritas salinan database tidak valid: {res}"))
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&staging);
-                Err(error)
-            }
-        }
+            drop(dst_conn);
+            fs::rename(&staging, dest)
+                .map_err(|error| format!("Gagal mempublikasikan berkas cadangan: {error}"))?;
+            set_private_file_permissions(dest)?;
+            let _ = fs::File::open(parent).and_then(|d| d.sync_all());
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&stage_dir);
+        result
     }
 
     pub fn verify_and_restore(source: &Path, target: &Path) -> Result<(), String> {
@@ -321,8 +306,12 @@ impl Storage {
                 return Err("Berkas sumber pemulihan tidak boleh sama dengan target aktif.".into());
             }
         }
+        let parent = target.parent().ok_or_else(|| "Lokasi target tidak valid.".to_string())?;
+        ensure_private_dir(parent)?;
         let (target_lock_file, target_lock_path) = claim_lock(target)?;
+        let stage_dir = parent.join(format!(".kael-restore-stage-{}", uuid::Uuid::new_v4()));
         let result = (|| -> Result<(), String> {
+            ensure_private_dir(&stage_dir)?;
             let src_conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(|error| format!("Berkas sumber tidak dapat dibuka: {error}"))?;
             let integrity: String = src_conn
@@ -332,16 +321,7 @@ impl Storage {
                 return Err(format!("Pemeriksaan integritas berkas cadangan gagal: {integrity}"));
             }
             drop(src_conn);
-            let parent = target.parent().ok_or_else(|| "Lokasi target tidak valid.".to_string())?;
-            let mut directory = fs::DirBuilder::new();
-            directory.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                directory.mode(0o700);
-            }
-            directory.create(parent).map_err(|error| error.to_string())?;
-            let temp = parent.join(format!(".kael-restore-{}.tmp", uuid::Uuid::new_v4()));
+            let temp = stage_dir.join("restored.sqlite");
             {
                 let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
                     .map_err(|error| error.to_string())?;
@@ -349,37 +329,37 @@ impl Storage {
                 src.execute(&format!("VACUUM INTO '{escaped}'"), [])
                     .map_err(|error| error.to_string())?;
             }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&temp, fs::Permissions::from_mode(0o600));
-            }
-            if let Err(error) = Self::load(&temp) {
-                let _ = fs::remove_file(&temp);
-                let _ = fs::remove_file(format!("{}-wal", temp.display()));
-                let _ = fs::remove_file(format!("{}-shm", temp.display()));
-                let _ = fs::remove_file(format!("{}-journal", temp.display()));
-                return Err(error);
-            }
+            set_private_file_permissions(&temp)?;
+            Self::load(&temp)?;
             let _ = fs::remove_file(format!("{}-wal", temp.display()));
             let _ = fs::remove_file(format!("{}-shm", temp.display()));
             let _ = fs::remove_file(format!("{}-journal", temp.display()));
+
+            let rollback = stage_dir.join("rollback.sqlite");
+            let had_target = target.exists();
+            if had_target {
+                fs::rename(target, &rollback)
+                    .map_err(|error| format!("Gagal mengamankan database lama sebelum pemulihan: {error}"))?;
+            }
+            if let Err(error) = fs::rename(&temp, target) {
+                if had_target {
+                    let _ = fs::rename(&rollback, target);
+                }
+                return Err(format!("Gagal memasang database hasil pemulihan: {error}"));
+            }
             let _ = fs::remove_file(format!("{}-wal", target.display()));
             let _ = fs::remove_file(format!("{}-shm", target.display()));
             let _ = fs::remove_file(format!("{}-journal", target.display()));
-            if let Err(error) = fs::rename(&temp, target) {
-                let _ = fs::remove_file(&temp);
-                return Err(format!("Gagal memasang database hasil pemulihan: {error}"));
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(target, fs::Permissions::from_mode(0o600));
-            }
+            set_private_file_permissions(target)?;
+            let _ = fs::File::open(parent).and_then(|d| d.sync_all());
             Ok(())
         })();
+        let _ = fs::remove_dir_all(&stage_dir);
         drop(target_lock_file);
         let _ = fs::remove_file(&target_lock_path);
+        if let Ok(mut active) = IN_PROCESS_LOCKS.lock() {
+            active.remove(&target_lock_path);
+        }
         result
     }
 
@@ -436,8 +416,41 @@ impl Storage {
     }
 }
 
+fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory.create(dir).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Gagal mengatur izin berkas privat: {error}"))?;
+    }
+    Ok(())
+}
+
 fn claim_lock(path: &Path) -> Result<(std::fs::File, std::path::PathBuf), String> {
     let lock_path = path.with_extension("sqlite.lock");
+    if let Ok(active) = IN_PROCESS_LOCKS.lock() {
+        if active.contains(&lock_path) {
+            return Err("Database KAEL sedang dipakai proses lain. Jalankan satu server untuk satu database.".into());
+        }
+    }
     for _ in 0..3 {
         let temp_lock = path.with_extension(format!("sqlite.lock.{}", std::process::id()));
         if let Ok(mut file) = OpenOptions::new().write(true).create(true).truncate(true).open(&temp_lock) {
@@ -445,6 +458,9 @@ fn claim_lock(path: &Path) -> Result<(std::fs::File, std::path::PathBuf), String
             let _ = file.sync_all();
             if fs::hard_link(&temp_lock, &lock_path).is_ok() {
                 let _ = fs::remove_file(&temp_lock);
+                if let Ok(mut active) = IN_PROCESS_LOCKS.lock() {
+                    active.insert(lock_path.clone());
+                }
                 return Ok((file, lock_path));
             }
             let _ = fs::remove_file(&temp_lock);
@@ -453,6 +469,9 @@ fn claim_lock(path: &Path) -> Result<(std::fs::File, std::path::PathBuf), String
             Ok(mut file) => {
                 let _ = write!(file, "{}", std::process::id());
                 let _ = file.sync_all();
+                if let Ok(mut active) = IN_PROCESS_LOCKS.lock() {
+                    active.insert(lock_path.clone());
+                }
                 return Ok((file, lock_path));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -460,7 +479,13 @@ fn claim_lock(path: &Path) -> Result<(std::fs::File, std::path::PathBuf), String
                     .ok()
                     .and_then(|raw| raw.trim().parse::<u32>().ok())
                     .unwrap_or(0);
-                let alive = pid > 0 && pid != std::process::id() && Path::new(&format!("/proc/{pid}")).exists();
+                let in_use_here = pid == std::process::id()
+                    && IN_PROCESS_LOCKS
+                        .lock()
+                        .map(|active| active.contains(&lock_path))
+                        .unwrap_or(false);
+                let alive = in_use_here
+                    || (pid > 0 && pid != std::process::id() && Path::new(&format!("/proc/{pid}")).exists());
                 if alive {
                     return Err("Database KAEL sedang dipakai proses lain. Jalankan satu server untuk satu database.".into());
                 }
@@ -788,4 +813,82 @@ fn normalize(db: &mut Value, path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn sample_db() -> Value {
+        json!({
+            "serverConfig": { "sessionTimeoutMinutes": 480 },
+            "users": [],
+            "facilities": [],
+            "patients": [],
+            "visits": [],
+            "soapRecords": [],
+            "beds": [],
+            "medications": [],
+            "pharmacyOrders": [],
+            "labOrders": [],
+            "invoices": [],
+            "accountingEntries": [],
+            "bridgingLogs": [],
+            "auditLogs": [],
+            "roles": [],
+            "facilityConfigs": [],
+            "evidenceRegistry": [],
+            "medicationMutations": [],
+            "purchaseOrders": [],
+            "radiologyOrders": [],
+            "surgicalSchedules": [],
+            "referrals": [],
+            "doubleEntryJournals": [],
+            "idempotencyRecords": [],
+            "attendance": [],
+            "leaveRequests": [],
+            "payrollRuns": [],
+            "inpatientNotes": [],
+            "soapRevisions": []
+        })
+    }
+
+    #[test]
+    fn backup_and_restore_enforce_private_perms_fresh_parent_and_active_lock() {
+        let root = std::env::temp_dir().join(format!("kael-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let active_db = root.join("active.sqlite");
+        Storage::create(&active_db, &sample_db()).unwrap();
+        let (store, _) = Storage::load(&active_db).unwrap();
+
+        let backup_path = root.join("backups/snap.sqlite");
+        store.backup_to(&backup_path).unwrap();
+        assert!(backup_path.is_file());
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        // Reject same-path backup
+        assert!(store.backup_to(&active_db).is_err());
+
+        // Reject restore while active server holds lock
+        assert!(Storage::verify_and_restore(&backup_path, &active_db).is_err());
+
+        drop(store);
+
+        // Restore to fresh nested parent after shutdown
+        let fresh_target = root.join("new_dir/nested/restored.sqlite");
+        Storage::verify_and_restore(&backup_path, &fresh_target).unwrap();
+        assert!(fresh_target.is_file());
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&fresh_target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 }

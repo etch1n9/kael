@@ -69,6 +69,21 @@ pub fn record_books(app: &mut App, ctx: &RequestContext, entry: &Value) {
 }
 
 fn balanced_journal(app: &mut App, ctx: &RequestContext, description: &str, reference: &str, debit_code: &str, debit_name: &str, credit_code: &str, credit_name: &str, amount: f64) {
+    balanced_journal_with_event(app, ctx, "INVENTORY", description, reference, debit_code, debit_name, credit_code, credit_name, amount);
+}
+
+fn balanced_journal_with_event(
+    app: &mut App,
+    ctx: &RequestContext,
+    event_type: &str,
+    description: &str,
+    reference: &str,
+    debit_code: &str,
+    debit_name: &str,
+    credit_code: &str,
+    credit_name: &str,
+    amount: f64,
+) {
     let amount = amount.round();
     if !amount.is_finite() || amount <= 0.0 {
         return;
@@ -77,7 +92,7 @@ fn balanced_journal(app: &mut App, ctx: &RequestContext, description: &str, refe
     let day = if timestamp.len() >= 10 { timestamp[..10].replace('-', "") } else { "00000000".into() };
     let head = format!("GL/{}/{}/", ctx.facility_code.chars().take(4).collect::<String>(), day);
     let sequence = next_document(array(&app.db, "doubleEntryJournals"), "journalNumber", &head);
-    let journal = json!({"id":id("gl"),"facilityCode":ctx.facility_code,"journalNumber":format!("{head}{sequence:04}"),"timestamp":timestamp,"eventType":"INVENTORY","sourceTransactionId":reference,"description":description,"lines":[{"accountCode":debit_code,"accountName":debit_name,"debit":amount,"credit":0},{"accountCode":credit_code,"accountName":credit_name,"debit":0,"credit":amount}],"totalDebit":amount,"totalCredit":amount,"isBalanced":true,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
+    let journal = json!({"id":id("gl"),"facilityCode":ctx.facility_code,"journalNumber":format!("{head}{sequence:04}"),"timestamp":timestamp,"eventType":event_type,"sourceTransactionId":reference,"description":description,"lines":[{"accountCode":debit_code,"accountName":debit_name,"debit":amount,"credit":0},{"accountCode":credit_code,"accountName":credit_name,"debit":0,"credit":amount}],"totalDebit":amount,"totalCredit":amount,"isBalanced":true,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
     array_mut(&mut app.db, "doubleEntryJournals").push(journal);
 }
 
@@ -222,6 +237,9 @@ pub fn handle(
         }
         if let Some(invoice_id) = rest.strip_suffix("/components") {
             return Some(component_action(app, ctx, invoice_id, body));
+        }
+        if let Some(invoice_id) = rest.strip_suffix("/resolve-cancelled") {
+            return Some(resolve_cancelled_invoice(app, ctx, invoice_id, body));
         }
     }
     None
@@ -489,6 +507,18 @@ fn set_pricing(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Val
             "Penetapan tarif hanya dapat dilakukan pada tagihan yang belum diselesaikan.",
         ));
     }
+    let inv_visit_id = text(&invoice, "visitId");
+    if !inv_visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == inv_visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        })
+    {
+        return Err(conflict(
+            "Kunjungan pasien telah dibatalkan; penetapan tarif tidak dapat dilakukan.",
+        ));
+    }
     let submitted = body["items"].as_array().filter(|items| !items.is_empty())
         .ok_or_else(|| bad_request("Masukkan seluruh rincian tagihan, minimal satu item. Tarif nol harus diisi secara eksplisit."))?;
     let existing_items = array(&invoice, "items").clone();
@@ -532,7 +562,8 @@ fn set_pricing(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Val
     invoice["pricingSource"] = json!("MANUAL");
     invoice["pricedAt"] = json!(now());
     invoice["pricedBy"] = ctx.user["id"].clone();
-    recalculate(&mut invoice, 0.0);
+    let existing_discount = number(&invoice, "discountAmount");
+    recalculate(&mut invoice, existing_discount);
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     audit(
         app,
@@ -557,6 +588,18 @@ fn add_item(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value)
     if text(&invoice, "status") != "BELUM_LUNAS" {
         return Err(conflict(
             "Tagihan yang telah diselesaikan tidak dapat ditambah item.",
+        ));
+    }
+    let inv_visit_id = text(&invoice, "visitId");
+    if !inv_visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == inv_visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        })
+    {
+        return Err(conflict(
+            "Kunjungan pasien telah dibatalkan; item tagihan tidak dapat ditambahkan.",
         ));
     }
     let quantity = number(body, "quantity");
@@ -684,15 +727,19 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         ));
     }
     let claim_visit_id = text(&invoice, "visitId");
-    if !claim_visit_id.is_empty()
+    let visit_cancelled = !claim_visit_id.is_empty()
         && array(&app.db, "visits").iter().any(|v| {
             text(v, "id") == claim_visit_id
                 && text(v, "facilityCode") == ctx.facility_code
                 && text(v, "status") == "BATAL"
-        })
+        });
+    let prev_received_check = number(&invoice, "totalReceivedAmount").round();
+    if visit_cancelled
+        && (prev_received_check <= 0.0
+            || text(&invoice, "cancellationResolutionStatus") != "CONTINUE_RECEIVABLE")
     {
         return Err(conflict(
-            "Kunjungan pasien pada klaim ini telah dibatalkan; pencairan klaim dihentikan.",
+            "Kunjungan pasien pada klaim ini telah dibatalkan; pencairan klaim dihentikan sampai resolusi piutang ditetapkan.",
         ));
     }
     if text(&invoice, "status") != "KLAIM_DIAJUKAN" || text(&invoice, "pricingStatus") != "COMPLETE"
@@ -777,6 +824,11 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     record_books(app, ctx, &entry);
     if writeoff_amount > 0.0 {
+        let adj_desc = format!(
+            "Penyesuaian selisih klaim final {} — {}",
+            text(&invoice, "invoiceNumber"),
+            text(&invoice, "patientName")
+        );
         let adj_entry = accounting_entry(
             app,
             ctx,
@@ -784,15 +836,23 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             "Selisih / Penyesuaian Klaim JKN & Piutang",
             "BEBAN",
             "OPERASIONAL",
-            &format!(
-                "Penyesuaian selisih klaim final {} — {}",
-                text(&invoice, "invoiceNumber"),
-                text(&invoice, "patientName")
-            ),
+            &adj_desc,
             writeoff_amount,
             text(&invoice, "invoiceNumber"),
         );
-        record_books(app, ctx, &adj_entry);
+        array_mut(&mut app.db, "accountingEntries").push(adj_entry);
+        balanced_journal_with_event(
+            app,
+            ctx,
+            "CLAIM_ADJUSTED",
+            &adj_desc,
+            text(&invoice, "invoiceNumber"),
+            "5-1900",
+            "Selisih / Penyesuaian Klaim JKN & Piutang",
+            "1-1200",
+            "Piutang Klaim JKN / Asuransi",
+            writeoff_amount,
+        );
     }
     let rec_visit_id = text(&invoice, "visitId").to_owned();
     if let Some("SELESAI") = compute_visit_post_service_status(app, &ctx.facility_code, &rec_visit_id) {
@@ -816,4 +876,156 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     );
     save(app)?;
     json_response(200, json!({"invoice":invoice,"entry":entry}))
+}
+
+fn resolve_cancelled_invoice(
+    app: &mut App,
+    ctx: &RequestContext,
+    invoice_id: &str,
+    body: &Value,
+) -> ApiResult {
+    require_service(
+        app,
+        ctx,
+        &["KLAIM_BPJS_PIUTANG", "KASIR_AKUNTANSI"],
+        &["SUB_CASHIER_BILLING_DEPOSIT"],
+    )?;
+    let index = invoice_index(app, ctx, invoice_id)?;
+    let mut invoice = array(&app.db, "invoices")[index].clone();
+    let prev_received = number(&invoice, "totalReceivedAmount").round();
+    if prev_received <= 0.0 || matches!(text(&invoice, "status"), "BATAL" | "LUNAS") {
+        return Err(conflict(
+            "Resolusi pembatalan hanya berlaku untuk tagihan aktif yang sudah menerima pembayaran sebagian.",
+        ));
+    }
+    let action = text(body, "action").trim();
+    let reason = text(body, "reason").trim();
+    if reason.is_empty() {
+        return Err(bad_request("Alasan resolusi tagihan wajib diisi."));
+    }
+    let net = (number(&invoice, "subtotal") - number(&invoice, "discountAmount"))
+        .max(0.0)
+        .round();
+    let timestamp = now();
+    match action {
+        "CONTINUE_RECEIVABLE" => {
+            invoice["cancellationResolutionStatus"] = json!("CONTINUE_RECEIVABLE");
+            invoice["cancellationResolutionReason"] = json!(reason);
+            invoice["cancellationResolvedBy"] = ctx.user["id"].clone();
+            invoice["cancellationResolvedAt"] = json!(timestamp);
+        }
+        "WRITEOFF_REMAINING" => {
+            let writeoff = (net - prev_received).max(0.0).round();
+            invoice["claimAdjustment"] = json!(writeoff);
+            invoice["status"] = json!("LUNAS");
+            invoice["paidAt"] = json!(timestamp);
+            invoice["cancellationResolutionStatus"] = json!("WRITEOFF_RESOLVED");
+            invoice["cancellationResolutionReason"] = json!(reason);
+            invoice["cancellationResolvedBy"] = ctx.user["id"].clone();
+            invoice["cancellationResolvedAt"] = json!(timestamp);
+            if writeoff > 0.0 {
+                let desc = format!(
+                    "Penghapusan sisa piutang kunjungan batal {} — {}",
+                    text(&invoice, "invoiceNumber"),
+                    text(&invoice, "patientName")
+                );
+                let adj = accounting_entry(
+                    app,
+                    ctx,
+                    "5-1900",
+                    "Selisih / Penyesuaian Klaim JKN & Piutang",
+                    "BEBAN",
+                    "OPERASIONAL",
+                    &desc,
+                    writeoff,
+                    text(&invoice, "invoiceNumber"),
+                );
+                array_mut(&mut app.db, "accountingEntries").push(adj);
+                balanced_journal_with_event(
+                    app,
+                    ctx,
+                    "CLAIM_ADJUSTED",
+                    &desc,
+                    text(&invoice, "invoiceNumber"),
+                    "5-1900",
+                    "Selisih / Penyesuaian Klaim JKN & Piutang",
+                    "1-1200",
+                    "Piutang Klaim JKN / Asuransi",
+                    writeoff,
+                );
+            }
+        }
+        "REFUND" => {
+            let refund_amount = body["refundAmount"]
+                .as_f64()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .map(|v| v.round())
+                .unwrap_or(prev_received);
+            if refund_amount <= 0.0 || refund_amount > prev_received {
+                return Err(bad_request(
+                    "Nominal pengembalian dana tidak boleh melebihi jumlah yang telah diterima.",
+                ));
+            }
+            let reference = text(body, "paymentReference").trim();
+            if reference.is_empty() {
+                return Err(bad_request("Referensi bukti pengembalian dana wajib diisi."));
+            }
+            let remaining_received = (prev_received - refund_amount).max(0.0).round();
+            invoice["totalReceivedAmount"] = json!(remaining_received);
+            if remaining_received == 0.0 {
+                invoice["status"] = json!("BATAL");
+            }
+            invoice["cancellationResolutionStatus"] = json!("REFUND_RESOLVED");
+            invoice["cancellationResolutionReason"] = json!(reason);
+            invoice["cancellationResolvedBy"] = ctx.user["id"].clone();
+            invoice["cancellationResolvedAt"] = json!(timestamp);
+            array_mut(&mut invoice, "refundReceipts").push(json!({
+                "amount": refund_amount,
+                "paymentReference": reference,
+                "reason": reason,
+                "refundedAt": timestamp,
+                "refundedBy": ctx.user["id"]
+            }));
+            let desc = format!(
+                "Pengembalian dana (refund) {} — {}",
+                text(&invoice, "invoiceNumber"),
+                text(&invoice, "patientName")
+            );
+            let refund_entry = accounting_entry(
+                app,
+                ctx,
+                "4-1015",
+                "Pengembalian Penerimaan Klaim / Layanan",
+                "PENGELUARAN",
+                "REFUND",
+                &desc,
+                refund_amount,
+                text(&invoice, "invoiceNumber"),
+            );
+            array_mut(&mut app.db, "accountingEntries").push(refund_entry);
+            balanced_journal_with_event(
+                app,
+                ctx,
+                "REFUND_APPROVED",
+                &desc,
+                text(&invoice, "invoiceNumber"),
+                "4-1015",
+                "Pengembalian Penerimaan Klaim / Layanan",
+                "1-1100",
+                "Kas dan setara kas",
+                refund_amount,
+            );
+        }
+        _ => return Err(bad_request("Aksi resolusi pembatalan tidak valid.")),
+    }
+    array_mut(&mut app.db, "invoices")[index] = invoice.clone();
+    audit(
+        app,
+        ctx,
+        "FINANCE_CANCELLED_INVOICE_RESOLVED",
+        text(&invoice, "invoiceNumber"),
+        &format!("Resolusi tagihan batal ({action}): {reason}"),
+    );
+    save(app)?;
+    json_response(200, invoice)
 }

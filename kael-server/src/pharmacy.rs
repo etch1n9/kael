@@ -194,33 +194,44 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
         .unwrap_or(old_buy_price);
     let explicit_ref = text(body, "referenceId").trim();
     let idem_key = text(body, "idempotencyKey").trim();
-    let now_dt = chrono::Utc::now();
-    let duplicate_mutation = array(&app.db, "medicationMutations")
-        .iter()
-        .rev()
-        .find(|m| {
+    let payload_fingerprint = format!(
+        "{medication_id}|{batch}|{expiry}|{}|{}|{supplier}",
+        (qty * 1000.0).round(),
+        (incoming_cost * 1000.0).round()
+    );
+    if !idem_key.is_empty() {
+        if let Some(existing_idem) = array(&app.db, "idempotencyRecords").iter().find(|row| {
+            text(row, "key") == idem_key
+                && text(row, "facilityCode") == ctx.facility_code
+                && text(row, "action") == "INVENTORY_RESTOCK"
+        }) {
+            let stored_fp = text(existing_idem, "fingerprint");
+            if !stored_fp.is_empty() && stored_fp != payload_fingerprint {
+                return Err(conflict(
+                    "Idempotency key sudah digunakan untuk penerimaan stok dengan data yang berbeda.",
+                ));
+            }
+            return json_response(200, existing_idem["response"].clone());
+        }
+    }
+    if !explicit_ref.is_empty() {
+        if let Some(existing_mut) = array(&app.db, "medicationMutations").iter().find(|m| {
             text(m, "facilityCode") == ctx.facility_code
-                && text(m, "medicationId") == medication_id
                 && text(m, "type") == "MASUK_PBF"
-        })
-        .is_some_and(|m| {
-            if !explicit_ref.is_empty() && text(m, "referenceId") == explicit_ref {
-                return true;
+                && text(m, "referenceId") == explicit_ref
+        }) {
+            let same_payload = text(existing_mut, "medicationId") == medication_id
+                && text(existing_mut, "batchNumber").eq_ignore_ascii_case(&batch)
+                && (n(existing_mut, "quantityChange") - qty).abs() < 1e-6
+                && (n(existing_mut, "unitPrice") - incoming_cost).abs() < 1e-6
+                && text(existing_mut, "counterpartyOrPatient") == supplier;
+            if same_payload {
+                return json_response(200, med);
             }
-            if !idem_key.is_empty() && text(m, "referenceId") == idem_key {
-                return true;
-            }
-            let same_payload = text(m, "batchNumber").eq_ignore_ascii_case(&batch)
-                && (n(m, "quantityChange") - qty).abs() < 1e-6
-                && (n(m, "unitPrice") - incoming_cost).abs() < 1e-6
-                && text(m, "counterpartyOrPatient") == supplier;
-            let recent = chrono::DateTime::parse_from_rfc3339(text(m, "timestamp"))
-                .map(|ts| (now_dt - ts.with_timezone(&chrono::Utc)).num_seconds().abs() <= 15)
-                .unwrap_or(false);
-            same_payload && recent
-        });
-    if duplicate_mutation {
-        return json_response(200, med);
+            return Err(conflict(
+                "Nomor referensi penerimaan stok sudah digunakan untuk transaksi lain.",
+            ));
+        }
     }
     for existing_batch in array_mut(&mut med, "batches") {
         if existing_batch.get("unitCost").and_then(Value::as_f64).is_none() {
@@ -276,6 +287,18 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
     let cost = (qty * incoming_cost).round();
     inventory_receipt(app, ctx, cost, &notes, &receipt_ref);
     array_mut(&mut app.db, "medications")[index] = med.clone();
+    if !idem_key.is_empty() {
+        array_mut(&mut app.db, "idempotencyRecords").push(json!({
+            "id": id("idem"),
+            "idempotencyKey": idem_key,
+            "key": idem_key,
+            "facilityCode": ctx.facility_code,
+            "action": "INVENTORY_RESTOCK",
+            "fingerprint": payload_fingerprint,
+            "response": med,
+            "createdAt": now()
+        }));
+    }
     audit(
         app,
         ctx,

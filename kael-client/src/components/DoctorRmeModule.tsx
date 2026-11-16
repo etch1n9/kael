@@ -359,6 +359,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     setProcedures((prev) => [
       ...prev,
       {
+        id: typeof crypto !== 'undefined' && crypto.randomUUID ? `proc-${crypto.randomUUID()}` : `proc-${Date.now()}-${prev.length}`,
         icd9Code: proc.code,
         name: proc.name,
         ...(procedureTariff === '' ? {} : { tariff: procedureTariff }),
@@ -1441,7 +1442,7 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
               <div className="space-y-1.5">
                 {procedures.map((proc, idx) => (
                   <div
-                    key={proc.icd9Code}
+                    key={proc.id || `${proc.icd9Code}-${idx}`}
                     className="flex items-center justify-between text-xs py-1.5 px-3 rounded border border-slate-200 dark:border-slate-800"
                   >
                     <span className="truncate pr-2">

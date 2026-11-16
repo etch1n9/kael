@@ -99,10 +99,16 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
     return workspace.invoices;
   }, [scopeMode, workspace.invoices, workspace.multiFacilityFinance]);
 
-  const summary = useMemo(
-    () => calculateFinancialSummary(rawEntries, rawInvoices),
-    [rawEntries, rawInvoices]
-  );
+  const summary = useMemo(() => {
+    const serverSummary =
+      scopeMode === 'ALL_OWNED'
+        ? workspace.multiFacilityFinance?.summary
+        : workspace.financeSummary;
+    if (serverSummary && (serverSummary.totalEntriesCount ?? 0) > rawEntries.length) {
+      return serverSummary;
+    }
+    return calculateFinancialSummary(rawEntries, rawInvoices);
+  }, [scopeMode, workspace.financeSummary, workspace.multiFacilityFinance?.summary, rawEntries, rawInvoices]);
 
   const erpAnalysis = useMemo(
     () =>

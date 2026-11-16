@@ -544,35 +544,59 @@ fn evidence(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     json_response(201, record)
 }
 
-fn parse_schedule_time(raw: &str) -> Option<chrono::NaiveDateTime> {
+fn parse_schedule_time(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let trimmed = raw.trim();
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
-        return Some(dt.naive_local());
+        return Some(dt.with_timezone(&chrono::Utc));
     }
+    let wib = chrono::FixedOffset::east_opt(7 * 3600)?;
     for fmt in [
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
     ] {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
-            return Some(dt);
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
+            if let Some(dt) = naive.and_local_timezone(wib).single() {
+                return Some(dt.with_timezone(&chrono::Utc));
+            }
         }
     }
     None
+}
+
+fn schedule_interval(
+    start_raw: &str,
+    end_raw: &str,
+    duration_minutes: Option<i64>,
+) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    let start = parse_schedule_time(start_raw)?;
+    let end = if !end_raw.trim().is_empty() {
+        let parsed_end = parse_schedule_time(end_raw)?;
+        if parsed_end <= start {
+            return None;
+        }
+        parsed_end
+    } else {
+        let mins = duration_minutes.unwrap_or(60).clamp(5, 1440);
+        start + chrono::Duration::minutes(mins)
+    };
+    Some((start, end))
 }
 
 fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     require_service(app, ctx, &["BEDAH_IBS"], &["SUB_SURGERY_IBS"])?;
     let proc_name = text(body, "procedureName").trim();
     let sched_start = text(body, "scheduledStart").trim();
+    let sched_end = text(body, "scheduledEnd").trim();
     let room_code = text(body, "operatingRoomCode").trim();
     if proc_name.is_empty() || sched_start.is_empty() || room_code.is_empty() {
         return Err(bad_request("Nama tindakan, kamar operasi, dan jadwal operasi wajib diisi."));
     }
-    let Some(sched_dt) = parse_schedule_time(sched_start) else {
+    let duration_mins = body["durationMinutes"].as_i64();
+    let Some((start_utc, end_utc)) = schedule_interval(sched_start, sched_end, duration_mins) else {
         return Err(bad_request(
-            "Format waktu mulai jadwal operasi tidak valid (gunakan YYYY-MM-DDTHH:MM).",
+            "Format waktu mulai/selesai jadwal operasi tidak valid (gunakan YYYY-MM-DDTHH:MM atau ISO-8601).",
         ));
     };
     let req_pid = text(body, "patientId").trim();
@@ -602,15 +626,39 @@ fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         {
             return false;
         }
-        if text(s, "scheduledStart") == sched_start {
-            return true;
+        let existing_dur = s["durationMinutes"].as_i64();
+        if let Some((ex_start, ex_end)) = schedule_interval(
+            text(s, "scheduledStart"),
+            text(s, "scheduledEnd"),
+            existing_dur,
+        ) {
+            start_utc < ex_end && ex_start < end_utc
+        } else {
+            text(s, "scheduledStart") == sched_start
         }
-        parse_schedule_time(text(s, "scheduledStart"))
-            .is_some_and(|existing_dt| (existing_dt - sched_dt).num_minutes().abs() < 60)
     }) {
         return Err(conflict("Kamar operasi sudah terjadwal pada rentang waktu tersebut."));
     }
-    let record = json!({"id":id("ibs"),"facilityCode":ctx.facility_code,"patientId":matched_patient["id"],"patientName":matched_patient["fullName"],"mrNumber":matched_patient["mrNumber"],"procedureName":proc_name,"icd9CmCode":text(body,"icd9CmCode").trim(),"operatingRoomCode":room_code,"surgeonName":text(body,"surgeonName").trim(),"anesthesiologistName":text(body,"anesthesiologistName").trim(),"scheduledStart":sched_start,"status":"SCHEDULED","whoSignInCompleted":false,"whoTimeOutCompleted":false,"whoSignOutCompleted":false,"createdAt":now()});
+    let record = json!({
+        "id": id("ibs"),
+        "facilityCode": ctx.facility_code,
+        "patientId": matched_patient["id"],
+        "patientName": matched_patient["fullName"],
+        "mrNumber": matched_patient["mrNumber"],
+        "procedureName": proc_name,
+        "icd9CmCode": text(body, "icd9CmCode").trim(),
+        "operatingRoomCode": room_code,
+        "surgeonName": text(body, "surgeonName").trim(),
+        "anesthesiologistName": text(body, "anesthesiologistName").trim(),
+        "scheduledStart": start_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "scheduledEnd": end_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "durationMinutes": (end_utc - start_utc).num_minutes(),
+        "status": "SCHEDULED",
+        "whoSignInCompleted": false,
+        "whoTimeOutCompleted": false,
+        "whoSignOutCompleted": false,
+        "createdAt": now()
+    });
     array_mut(&mut app.db, "surgicalSchedules").push(record.clone());
     audit(app, ctx, "SURGERY_SCHEDULED", text(&record, "id"), &format!("Jadwal {}.", text(&record, "procedureName")));
     save(app)?;
@@ -626,6 +674,58 @@ fn surgery_update(app: &mut App, ctx: &RequestContext, schedule_id: &str, body: 
     let mut record = array(&app.db, "surgicalSchedules")[index].clone();
     if matches!(text(&record, "status"), "COMPLETED" | "CANCELLED") {
         return Err(conflict("Jadwal operasi yang sudah selesai atau dibatalkan tidak dapat diubah kembali."));
+    }
+    if body.get("operatingRoomCode").is_some()
+        || body.get("scheduledStart").is_some()
+        || body.get("scheduledEnd").is_some()
+        || body.get("durationMinutes").is_some()
+    {
+        let next_room = if !text(body, "operatingRoomCode").trim().is_empty() {
+            text(body, "operatingRoomCode").trim().to_owned()
+        } else {
+            text(&record, "operatingRoomCode").trim().to_owned()
+        };
+        let next_start_raw = if !text(body, "scheduledStart").trim().is_empty() {
+            text(body, "scheduledStart").trim().to_owned()
+        } else {
+            text(&record, "scheduledStart").trim().to_owned()
+        };
+        let next_end_raw = if body.get("scheduledEnd").is_some() {
+            text(body, "scheduledEnd").trim().to_owned()
+        } else if body.get("durationMinutes").is_some() || body.get("scheduledStart").is_some() {
+            String::new()
+        } else {
+            text(&record, "scheduledEnd").trim().to_owned()
+        };
+        let next_dur = body["durationMinutes"]
+            .as_i64()
+            .or_else(|| record["durationMinutes"].as_i64());
+        let Some((start_utc, end_utc)) = schedule_interval(&next_start_raw, &next_end_raw, next_dur)
+        else {
+            return Err(bad_request(
+                "Format waktu mulai/selesai jadwal operasi tidak valid.",
+            ));
+        };
+        if array(&app.db, "surgicalSchedules").iter().any(|s| {
+            if text(s, "id") == schedule_id
+                || text(s, "facilityCode") != ctx.facility_code
+                || !text(s, "operatingRoomCode").eq_ignore_ascii_case(&next_room)
+                || text(s, "status") == "CANCELLED"
+            {
+                return false;
+            }
+            let ex_dur = s["durationMinutes"].as_i64();
+            schedule_interval(text(s, "scheduledStart"), text(s, "scheduledEnd"), ex_dur)
+                .is_some_and(|(ex_start, ex_end)| start_utc < ex_end && ex_start < end_utc)
+        }) {
+            return Err(conflict(
+                "Kamar operasi sudah terjadwal pada rentang waktu tersebut.",
+            ));
+        }
+        record["operatingRoomCode"] = json!(next_room);
+        record["scheduledStart"] = json!(start_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        record["scheduledEnd"] = json!(end_utc.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        record["durationMinutes"] = json!((end_utc - start_utc).num_minutes());
     }
     if let Some(sign_in) = body.get("whoSignInCompleted").and_then(Value::as_bool) {
         record["whoSignInCompleted"] = json!(sign_in);
@@ -704,4 +804,25 @@ fn staff_record(app: &mut App, ctx: &RequestContext, body: &Value, collection: &
     audit(app, ctx, action, text(&record, "id"), &format!("{action} {}.", text(&record, "staffName")));
     save(app)?;
     json_response(201, record)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_interval_normalizes_timezones_and_detects_half_open_overlaps() {
+        let (s1, e1) = schedule_interval("2026-11-20T10:00:00+07:00", "", Some(90)).unwrap();
+        let (s2, e2) = schedule_interval("2026-11-20T03:00:00Z", "", Some(60)).unwrap();
+        assert_eq!(s1, s2);
+        assert!(s1 < e2 && s2 < e1);
+
+        // Exact boundary after 90-minute operation (11:30 WIB) should NOT overlap
+        let (s3, e3) = schedule_interval("2026-11-20T11:30", "", Some(60)).unwrap();
+        assert!(!(s1 < e3 && s3 < e1));
+
+        // 75-minute offset (11:15 WIB) MUST overlap 90-minute operation
+        let (s4, e4) = schedule_interval("2026-11-20T11:15", "", Some(60)).unwrap();
+        assert!(s1 < e4 && s4 < e1);
+    }
 }

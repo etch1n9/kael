@@ -107,6 +107,9 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
   const [expiryDate, setExpiryDate] = useState('');
   const [restockQty, setRestockQty] = useState<number>(1);
   const [supplierName, setSupplierName] = useState('');
+  const [restockIdemKey, setRestockIdemKey] = useState<string>(() =>
+    typeof crypto !== 'undefined' && crypto.randomUUID ? `rst-${crypto.randomUUID()}` : `rst-${Date.now()}`
+  );
   const [isRestocking, setIsRestocking] = useState(false);
 
   // 2. Direct Outgoing Medication (Obat Keluar ke Pasien / Unit) Form State
@@ -464,6 +467,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         expiryDate,
         quantity: Number(restockQty),
         supplierName,
+        idempotencyKey: restockIdemKey,
       });
       const addedQty = restockQty;
       const addedBatch = batchNumber.toUpperCase();
@@ -471,6 +475,9 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
       setExpiryDate('');
       setRestockQty(1);
       setSupplierName('');
+      setRestockIdemKey(
+        typeof crypto !== 'undefined' && crypto.randomUUID ? `rst-${crypto.randomUUID()}` : `rst-${Date.now()}-${Math.random()}`
+      );
       await onRefreshWorkspace();
       setFeedback({
         type: 'success',

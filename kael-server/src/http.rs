@@ -845,19 +845,6 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
         if code.is_empty() || !collection_access(key) {
             return vec![];
         }
-        let cap = if matches!(
-            key,
-            "accountingEntries"
-                | "invoices"
-                | "doubleEntryJournals"
-                | "purchaseOrders"
-                | "medications"
-                | "medicationMutations"
-        ) {
-            usize::MAX
-        } else {
-            limit
-        };
         present_refs(
             array(&app.db, key)
                 .iter()
@@ -875,8 +862,95 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
                     true
                 })
                 .collect(),
-            cap,
+            limit,
         )
+    };
+    let compute_finance_summary = |facility_codes: &[&str]| -> Value {
+        let mut total_revenue = 0.0_f64;
+        let mut total_expense = 0.0_f64;
+        let mut rev_by_cat: HashMap<String, f64> = HashMap::new();
+        let mut exp_by_cat: HashMap<String, f64> = HashMap::new();
+        let mut entries_count = 0usize;
+        for entry in array(&app.db, "accountingEntries") {
+            let fac = text(entry, "facilityCode");
+            if !facility_codes.contains(&fac) || !in_window(entry, from, to) {
+                continue;
+            }
+            entries_count += 1;
+            let amt = entry["amount"].as_f64().unwrap_or(0.0);
+            if !amt.is_finite() {
+                continue;
+            }
+            let cat = text(entry, "category").to_owned();
+            match text(entry, "type") {
+                "PENDAPATAN" => {
+                    total_revenue += amt;
+                    *rev_by_cat.entry(cat).or_default() += amt;
+                }
+                "PENGELUARAN" | "BEBAN" => {
+                    total_expense += amt;
+                    *exp_by_cat.entry(cat).or_default() += amt;
+                }
+                _ => {}
+            }
+        }
+        let mut pending_bpjs = 0.0_f64;
+        let mut unpaid_patient = 0.0_f64;
+        let mut invoices_count = 0usize;
+        for inv in array(&app.db, "invoices") {
+            let fac = text(inv, "facilityCode");
+            if !facility_codes.contains(&fac) || !in_window(inv, from, to) {
+                continue;
+            }
+            invoices_count += 1;
+            if text(inv, "pricingStatus") == "PENDING" {
+                continue;
+            }
+            let st = text(inv, "status");
+            if !matches!(st, "KLAIM_DIAJUKAN" | "BELUM_LUNAS") {
+                continue;
+            }
+            let net = (inv["subtotal"].as_f64().unwrap_or(0.0)
+                - inv["discountAmount"].as_f64().unwrap_or(0.0)
+                - inv["depositAppliedAmount"].as_f64().unwrap_or(0.0))
+            .max(0.0);
+            let received = inv["totalReceivedAmount"].as_f64().unwrap_or(0.0);
+            let adjustment = inv["claimAdjustment"].as_f64().unwrap_or(0.0);
+            let is_bpjs = text(inv, "guarantorSettlement") == "BPJS"
+                || text(inv, "guarantor") == "BPJS_KESEHATAN"
+                || text(inv, "guarantor").starts_with("BPJS");
+            let obligation = if is_bpjs {
+                let claim = inv["claimRequestedAmount"].as_f64().unwrap_or(0.0);
+                if claim > 0.0 { claim } else { net }
+            } else {
+                let due = inv["patientPayableAmount"].as_f64().unwrap_or(0.0);
+                if due > 0.0 { due } else { net }
+            };
+            let outstanding = (obligation - received - adjustment).round().max(0.0);
+            if st == "KLAIM_DIAJUKAN" {
+                pending_bpjs += outstanding;
+            } else {
+                unpaid_patient += outstanding;
+            }
+        }
+        let net_profit = total_revenue - total_expense;
+        let margin = if total_revenue > 0.0 {
+            ((net_profit / total_revenue) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+        json!({
+            "totalRevenue": total_revenue,
+            "totalExpense": total_expense,
+            "netProfit": net_profit,
+            "profitMarginPercent": margin,
+            "pendingBpjsClaims": pending_bpjs,
+            "unpaidPatientReceivables": unpaid_patient,
+            "revenueByCategory": rev_by_cat,
+            "expenseByCategory": exp_by_cat,
+            "totalEntriesCount": entries_count,
+            "totalInvoicesCount": invoices_count,
+        })
     };
     let visible_users: Vec<Value> = array(&app.db, "users")
         .iter()
@@ -946,6 +1020,9 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
     if !facility.is_null() {
         result["activeFacilityConfig"] = active_config(&app.db, &facility);
     }
+    if !facility.is_null() && finance {
+        result["financeSummary"] = compute_finance_summary(&[code.as_str()]);
+    }
     if !facility.is_null() && allows(app, user, code, "KEUANGAN_OWNER") {
         let codes: Vec<&str> = accessible
             .iter()
@@ -953,7 +1030,6 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
             .filter(|code| allows(app, user, code, "KEUANGAN_OWNER"))
             .collect();
         for key in ["accountingEntries", "invoices", "visits", "medications", "medicationMutations", "purchaseOrders", "doubleEntryJournals"] {
-            let cap = if key == "visits" { limit } else { usize::MAX };
             result["multiFacilityFinance"][key] = json!(present_refs(
                 array(&app.db, key)
                     .iter()
@@ -961,9 +1037,10 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
                         && (key != "visits" || can_read_visits_at(text(entry, "facilityCode")))
                         && in_window(entry, from, to))
                     .collect(),
-                cap
+                limit
             ));
         }
+        result["multiFacilityFinance"]["summary"] = compute_finance_summary(&codes);
     }
     let payroll_access = superuser || has_any(&["SDM_ERP"]);
     let people_access = superuser || has_any(&["SDM_ERP", "SDM_JADWAL"]);

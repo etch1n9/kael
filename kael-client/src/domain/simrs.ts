@@ -445,6 +445,7 @@ export interface PrescriptionItem {
 }
 
 export interface ClinicalProcedureItem {
+  id?: string;
   icd9Code: string;
   name: string;
   tariff?: number | null;
