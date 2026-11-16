@@ -646,9 +646,9 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
                 }
                 if !matches!(current, "BATAL" | "LUNAS" | "KLAIM_DISETUJUI" | "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED") {
                     row["status"] = json!("BATAL");
-                    if key == "invoices" {
-                        cancelled_invoices.push(row.clone());
-                    }
+                }
+                if key == "invoices" && text(row, "status") == "BATAL" {
+                    cancelled_invoices.push(row.clone());
                 }
             }
         }

@@ -77,37 +77,72 @@ pub fn reverse_open_claim_receivable(
     ctx: &RequestContext,
     invoice: &Value,
     reason: &str,
-) {
+) -> bool {
+    let inv_id = text(invoice, "id");
     let inv_num = text(invoice, "invoiceNumber");
-    if inv_num.is_empty() {
-        return;
+    if inv_id.is_empty() && inv_num.is_empty() {
+        return false;
     }
+    let duplicate_inv_num = !inv_num.is_empty()
+        && array(&app.db, "invoices")
+            .iter()
+            .filter(|row| {
+                text(row, "facilityCode") == ctx.facility_code
+                    && text(row, "invoiceNumber") == inv_num
+            })
+            .count()
+            > 1;
+
     let mut open_receivable = 0.0_f64;
+    let mut source_journal_ids = Vec::new();
     for j in array(&app.db, "doubleEntryJournals") {
-        if text(j, "facilityCode") != ctx.facility_code || text(j, "sourceTransactionId") != inv_num {
+        if text(j, "facilityCode") != ctx.facility_code {
             continue;
         }
+        let j_inv_id = text(j, "invoiceId");
+        let matched = if !j_inv_id.is_empty() {
+            !inv_id.is_empty() && j_inv_id == inv_id
+        } else {
+            !duplicate_inv_num && !inv_num.is_empty() && text(j, "sourceTransactionId") == inv_num
+        };
+        if !matched {
+            continue;
+        }
+        let mut line_delta = 0.0_f64;
         for line in array(j, "lines") {
             if text(line, "accountCode") == "1-1200" {
-                open_receivable += number(line, "debit") - number(line, "credit");
+                line_delta += number(line, "debit") - number(line, "credit");
+            }
+        }
+        if line_delta.abs() > 0.0 {
+            open_receivable += line_delta;
+            if line_delta > 0.0 {
+                let jid = text(j, "id");
+                if !jid.is_empty() {
+                    source_journal_ids.push(jid.to_owned());
+                }
             }
         }
     }
     let open_receivable = open_receivable.round();
     if open_receivable > 0.0 {
-        balanced_journal_with_event(
+        balanced_journal_for_invoice(
             app,
             ctx,
             "CLAIM_REVERSED",
             &format!("Pembalikan pengakuan piutang {} — {} ({reason})", inv_num, text(invoice, "patientName")),
             inv_num,
+            inv_id,
+            &source_journal_ids,
             "4-1015",
             "Pencairan Klaim JKN BPJS / Piutang Korporasi",
             "1-1200",
             "Piutang Klaim JKN / Asuransi",
             open_receivable,
         );
+        return true;
     }
+    false
 }
 
 fn balanced_journal_with_event(
@@ -122,6 +157,37 @@ fn balanced_journal_with_event(
     credit_name: &str,
     amount: f64,
 ) {
+    balanced_journal_for_invoice(
+        app,
+        ctx,
+        event_type,
+        description,
+        reference,
+        "",
+        &[],
+        debit_code,
+        debit_name,
+        credit_code,
+        credit_name,
+        amount,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn balanced_journal_for_invoice(
+    app: &mut App,
+    ctx: &RequestContext,
+    event_type: &str,
+    description: &str,
+    reference: &str,
+    invoice_id: &str,
+    reversed_source_journal_ids: &[String],
+    debit_code: &str,
+    debit_name: &str,
+    credit_code: &str,
+    credit_name: &str,
+    amount: f64,
+) {
     let amount = amount.round();
     if !amount.is_finite() || amount <= 0.0 {
         return;
@@ -130,7 +196,13 @@ fn balanced_journal_with_event(
     let day = if timestamp.len() >= 10 { timestamp[..10].replace('-', "") } else { "00000000".into() };
     let head = format!("GL/{}/{}/", ctx.facility_code.chars().take(4).collect::<String>(), day);
     let sequence = next_document(array(&app.db, "doubleEntryJournals"), "journalNumber", &head);
-    let journal = json!({"id":id("gl"),"facilityCode":ctx.facility_code,"journalNumber":format!("{head}{sequence:04}"),"timestamp":timestamp,"eventType":event_type,"sourceTransactionId":reference,"description":description,"lines":[{"accountCode":debit_code,"accountName":debit_name,"debit":amount,"credit":0},{"accountCode":credit_code,"accountName":credit_name,"debit":0,"credit":amount}],"totalDebit":amount,"totalCredit":amount,"isBalanced":true,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
+    let mut journal = json!({"id":id("gl"),"facilityCode":ctx.facility_code,"journalNumber":format!("{head}{sequence:04}"),"timestamp":timestamp,"eventType":event_type,"sourceTransactionId":reference,"description":description,"lines":[{"accountCode":debit_code,"accountName":debit_name,"debit":amount,"credit":0},{"accountCode":credit_code,"accountName":credit_name,"debit":0,"credit":amount}],"totalDebit":amount,"totalCredit":amount,"isBalanced":true,"status":"POSTED_IMMUTABLE","actorName":ctx.user["fullName"]});
+    if !invoice_id.is_empty() {
+        journal["invoiceId"] = json!(invoice_id);
+    }
+    if !reversed_source_journal_ids.is_empty() {
+        journal["reversedSourceJournalIds"] = json!(reversed_source_journal_ids);
+    }
     array_mut(&mut app.db, "doubleEntryJournals").push(journal);
 }
 
@@ -265,6 +337,9 @@ pub fn handle(
     }
     if path == "/api/finance/reconcile-claim" {
         return Some(reconcile(app, ctx, body));
+    }
+    if path == "/api/finance/reconcile-cancelled-claims" {
+        return Some(reconcile_cancelled_claims_endpoint(app, ctx));
     }
     if let Some(rest) = path.strip_prefix("/api/invoices/") {
         if let Some(invoice_id) = rest.strip_suffix("/pay") {
@@ -501,12 +576,14 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
             text(&invoice, "patientName"),
             text(&invoice, "mrNumber")
         );
-        balanced_journal_with_event(
+        balanced_journal_for_invoice(
             app,
             ctx,
             "CLAIM_RECOGNIZED",
             &desc,
             text(&invoice, "invoiceNumber"),
+            text(&invoice, "id"),
+            &[],
             "1-1200",
             "Piutang Klaim JKN / Asuransi",
             "4-1015",
@@ -863,6 +940,7 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         "{} (Otorisasi Keuangan)",
         text(&ctx.user, "fullName")
     ));
+    let inv_id = text(&invoice, "id").to_owned();
     let inv_num = text(&invoice, "invoiceNumber").to_owned();
     let rec_desc = format!(
         "Penerimaan klaim {} — {}",
@@ -883,17 +961,20 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     let has_recognized = array(&app.db, "doubleEntryJournals").iter().any(|j| {
         text(j, "facilityCode") == ctx.facility_code
-            && text(j, "sourceTransactionId") == inv_num
             && text(j, "eventType") == "CLAIM_RECOGNIZED"
+            && (text(j, "invoiceId") == inv_id
+                || (text(j, "invoiceId").is_empty() && text(j, "sourceTransactionId") == inv_num))
     });
     let unrecognized_balance = (net - prev_received).max(0.0).round();
     if !has_recognized && unrecognized_balance > 0.0 {
-        balanced_journal_with_event(
+        balanced_journal_for_invoice(
             app,
             ctx,
             "CLAIM_RECOGNIZED",
             &format!("Pengakuan Piutang Klaim {} — {}", inv_num, text(&invoice, "patientName")),
             &inv_num,
+            &inv_id,
+            &[],
             "1-1200",
             "Piutang Klaim JKN / Asuransi",
             "4-1015",
@@ -902,12 +983,14 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         );
     }
     array_mut(&mut app.db, "accountingEntries").push(entry.clone());
-    balanced_journal_with_event(
+    balanced_journal_for_invoice(
         app,
         ctx,
         "CLAIM_RECEIPT",
         &rec_desc,
         &inv_num,
+        &inv_id,
+        &[],
         "1-1100",
         "Kas dan setara kas",
         "1-1200",
@@ -932,12 +1015,14 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             &inv_num,
         );
         array_mut(&mut app.db, "accountingEntries").push(adj_entry);
-        balanced_journal_with_event(
+        balanced_journal_for_invoice(
             app,
             ctx,
             "CLAIM_ADJUSTED",
             &adj_desc,
             &inv_num,
+            &inv_id,
+            &[],
             "5-1900",
             "Selisih / Penyesuaian Klaim JKN & Piutang",
             "1-1200",
@@ -1081,20 +1166,24 @@ fn resolve_cancelled_invoice(
             invoice["cancellationResolvedBy"] = ctx.user["id"].clone();
             invoice["cancellationResolvedAt"] = json!(timestamp);
             if writeoff > 0.0 {
+                let inv_id = text(&invoice, "id").to_owned();
                 let inv_num = text(&invoice, "invoiceNumber").to_owned();
                 let has_recognized = array(&app.db, "doubleEntryJournals").iter().any(|j| {
                     text(j, "facilityCode") == ctx.facility_code
-                        && text(j, "sourceTransactionId") == inv_num
                         && text(j, "eventType") == "CLAIM_RECOGNIZED"
+                        && (text(j, "invoiceId") == inv_id
+                            || (text(j, "invoiceId").is_empty() && text(j, "sourceTransactionId") == inv_num))
                 });
                 let unrecognized_balance = (net - prev_received).max(0.0).round();
                 if !has_recognized && unrecognized_balance > 0.0 {
-                    balanced_journal_with_event(
+                    balanced_journal_for_invoice(
                         app,
                         ctx,
                         "CLAIM_RECOGNIZED",
                         &format!("Pengakuan Piutang Klaim {} — {}", inv_num, text(&invoice, "patientName")),
                         &inv_num,
+                        &inv_id,
+                        &[],
                         "1-1200",
                         "Piutang Klaim JKN / Asuransi",
                         "4-1015",
@@ -1119,12 +1208,14 @@ fn resolve_cancelled_invoice(
                     &inv_num,
                 );
                 array_mut(&mut app.db, "accountingEntries").push(adj);
-                balanced_journal_with_event(
+                balanced_journal_for_invoice(
                     app,
                     ctx,
                     "CLAIM_ADJUSTED",
                     &desc,
                     &inv_num,
+                    &inv_id,
+                    &[],
                     "5-1900",
                     "Selisih / Penyesuaian Klaim JKN & Piutang",
                     "1-1200",
@@ -1178,12 +1269,14 @@ fn resolve_cancelled_invoice(
                 text(&invoice, "invoiceNumber"),
             );
             array_mut(&mut app.db, "accountingEntries").push(refund_entry);
-            balanced_journal_with_event(
+            balanced_journal_for_invoice(
                 app,
                 ctx,
                 "REFUND_APPROVED",
                 &desc,
                 text(&invoice, "invoiceNumber"),
+                text(&invoice, "id"),
+                &[],
                 "4-1015",
                 "Pengembalian Penerimaan Klaim / Layanan",
                 "1-1100",
@@ -1218,6 +1311,42 @@ fn resolve_cancelled_invoice(
     );
     save(app)?;
     json_response(200, invoice)
+}
+
+fn reconcile_cancelled_claims_endpoint(app: &mut App, ctx: &RequestContext) -> ApiResult {
+    require_service(
+        app,
+        ctx,
+        &["KLAIM_BPJS_PIUTANG", "KASIR_AKUNTANSI", "KEUANGAN_OWNER"],
+        &["SUB_CASHIER_BILLING_DEPOSIT"],
+    )?;
+    let cancelled: Vec<Value> = array(&app.db, "invoices")
+        .iter()
+        .filter(|inv| {
+            text(inv, "facilityCode") == ctx.facility_code && text(inv, "status") == "BATAL"
+        })
+        .cloned()
+        .collect();
+    let mut reconciled_ids = Vec::new();
+    for inv in &cancelled {
+        if reverse_open_claim_receivable(app, ctx, inv, "Rekonsiliasi piutang klaim batal historis") {
+            reconciled_ids.push(text(inv, "id").to_owned());
+        }
+    }
+    if !reconciled_ids.is_empty() {
+        audit(
+            app,
+            ctx,
+            "FINANCE_CANCELLED_CLAIMS_RECONCILED",
+            &ctx.facility_code,
+            &format!("Rekonsiliasi {} invoice BATAL historis.", reconciled_ids.len()),
+        );
+        save(app)?;
+    }
+    json_response(
+        200,
+        json!({ "reconciledCount": reconciled_ids.len(), "reconciledInvoiceIds": reconciled_ids }),
+    )
 }
 
 #[cfg(test)]
@@ -1454,6 +1583,95 @@ mod tests {
         assert_eq!(account_balance(&app, "1-1200"), 0.0);
         assert_eq!(account_balance(&app, "5-1900"), 100000.0);
         assert_eq!(account_balance(&app, "4-1015"), -120000.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn duplicate_invoice_number_reverses_only_matching_invoice_id_and_holds_ambiguous_legacy() {
+        let (mut app, ctx, root) = test_app();
+        // Two invoices sharing legacy duplicate invoiceNumber
+        array_mut(&mut app.db, "invoices")[0]["subtotal"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["bpjsCoveredAmount"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["items"][0]["unitPrice"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["items"][0]["subtotal"] = json!(150000);
+        array_mut(&mut app.db, "invoices").push(json!({
+            "id": "inv-2",
+            "facilityCode": "FAC1",
+            "invoiceNumber": "INV/FAC1/20261117/0001",
+            "visitId": "vis-2",
+            "patientId": "pat-1",
+            "patientName": "Pasien Uji",
+            "mrNumber": "RM-000001",
+            "guarantor": "BPJS_KESEHATAN",
+            "guarantorSettlement": "BPJS",
+            "items": [{ "id": "bli-2", "key": "consultation", "category": "KONSULTASI", "description": "Konsultasi 2", "quantity": 1, "unitPrice": 90000, "subtotal": 90000 }],
+            "unpricedItems": [],
+            "pricingStatus": "COMPLETE",
+            "subtotal": 90000,
+            "discountAmount": 0,
+            "bpjsCoveredAmount": 90000,
+            "patientPayableAmount": 0,
+            "status": "BELUM_LUNAS"
+        }));
+
+        // Pay both with KLAIM_BPJS so each posts CLAIM_RECOGNIZED with its own invoiceId
+        pay(&mut app, &ctx, "inv-1", &json!({ "paymentMethod": "KLAIM_BPJS" })).unwrap();
+        pay(&mut app, &ctx, "inv-2", &json!({ "paymentMethod": "KLAIM_BPJS" })).unwrap();
+        assert_eq!(account_balance(&app, "1-1200"), 240000.0);
+
+        // Cancel inv-1 (150.000): must reverse ONLY 150.000, leaving 90.000 active for inv-2
+        let inv1 = array(&app.db, "invoices")[0].clone();
+        array_mut(&mut app.db, "invoices")[0]["status"] = json!("BATAL");
+        assert!(reverse_open_claim_receivable(&mut app, &ctx, &inv1, "Batal inv-1"));
+        assert_eq!(account_balance(&app, "1-1200"), 90000.0);
+
+        // Also test ambiguous legacy journal without invoiceId when invoiceNumber is duplicated:
+        // must HOLD automatic reversal rather than reversing another claim
+        array_mut(&mut app.db, "doubleEntryJournals").push(json!({
+            "id": "gl-legacy-ambig",
+            "facilityCode": "FAC1",
+            "journalNumber": "GL/FAC1/20261117/9999",
+            "eventType": "CLAIM_RECOGNIZED",
+            "sourceTransactionId": "INV/FAC1/20261117/0001",
+            "lines": [
+                { "accountCode": "1-1200", "debit": 50000, "credit": 0 },
+                { "accountCode": "4-1015", "debit": 0, "credit": 50000 }
+            ]
+        }));
+        assert!(!reverse_open_claim_receivable(&mut app, &ctx, &inv1, "Retry"));
+        assert_eq!(account_balance(&app, "1-1200"), 140000.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn historical_already_cancelled_claim_reconciles_once_idempotently() {
+        let (mut app, ctx, root) = test_app();
+        // Historical claim already BATAL before upgrade with 150.000 still open in GL
+        array_mut(&mut app.db, "invoices")[0]["status"] = json!("BATAL");
+        array_mut(&mut app.db, "doubleEntryJournals").push(json!({
+            "id": "gl-hist-1",
+            "facilityCode": "FAC1",
+            "journalNumber": "GL/FAC1/20261110/0001",
+            "eventType": "CLAIM_RECOGNIZED",
+            "sourceTransactionId": "INV/FAC1/20261117/0001",
+            "lines": [
+                { "accountCode": "1-1200", "debit": 150000, "credit": 0 },
+                { "accountCode": "4-1015", "debit": 0, "credit": 150000 }
+            ]
+        }));
+        assert_eq!(account_balance(&app, "1-1200"), 150000.0);
+
+        let r1 = reconcile_cancelled_claims_endpoint(&mut app, &ctx).unwrap();
+        assert_eq!(r1.body.as_ref().unwrap()["reconciledCount"], json!(1));
+        assert_eq!(account_balance(&app, "1-1200"), 0.0);
+        assert_eq!(account_balance(&app, "4-1015"), 0.0);
+        let rev_journal = array(&app.db, "doubleEntryJournals").last().unwrap();
+        assert_eq!(rev_journal["reversedSourceJournalIds"], json!(["gl-hist-1"]));
+
+        // Running reconciliation again must be a no-op (0 posted)
+        let r2 = reconcile_cancelled_claims_endpoint(&mut app, &ctx).unwrap();
+        assert_eq!(r2.body.as_ref().unwrap()["reconciledCount"], json!(0));
+        assert_eq!(account_balance(&app, "1-1200"), 0.0);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
