@@ -21,6 +21,7 @@ import {
   MedicationStockMutation,
   ModuleKey,
   PharmacyOrder,
+  RadiologyOrderRis,
 } from '../domain/simrs.ts';
 import { kaelApi, WorkspacePayload } from '../utils/apiClient';
 import { evaluateLabFlag, formatRupiah } from '../domain/clinicalLogic.ts';
@@ -46,6 +47,17 @@ type PharmacySubTab =
   | 'LABORATORIUM'
   | 'RADIOLOGI_RIS'
   | 'PENUNJANG_RS';
+
+function mergeRowsById<T extends { id: string }>(base: readonly T[], extra: readonly T[]): T[] {
+  const seen = new Set(base.map((row) => row.id));
+  const merged = [...base];
+  for (const row of extra) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    merged.push(row);
+  }
+  return merged;
+}
 
 export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
   token,
@@ -79,6 +91,9 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
   const isInventoryContext = ['APOTEK', 'KATALOG_OPNAME', 'MUTASI_STOK', 'PENGADAAN_PBF'].includes(initialView);
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
   const [searchQuery, setSearchQuery] = useState('');
+  const [remotePharmacyOrders, setRemotePharmacyOrders] = useState<PharmacyOrder[]>([]);
+  const [remoteLabOrders, setRemoteLabOrders] = useState<LabOrder[]>([]);
+  const [remoteRadiologyOrders, setRemoteRadiologyOrders] = useState<RadiologyOrderRis[]>([]);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null
   );
@@ -329,11 +344,42 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
       );
     });
   }, [mutations, mutationTypeFilter, mutationMedFilter, searchQuery]);
+
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2) {
+      setRemotePharmacyOrders([]);
+      setRemoteLabOrders([]);
+      setRemoteRadiologyOrders([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      kaelApi.searchRecords(token, facilityCode, q, controller.signal)
+        .then((found) => {
+          if (controller.signal.aborted) return;
+          const extra = found as typeof found & {
+            pharmacyOrders?: PharmacyOrder[];
+            labOrders?: LabOrder[];
+            radiologyOrders?: RadiologyOrderRis[];
+          };
+          setRemotePharmacyOrders(extra.pharmacyOrders || []);
+          setRemoteLabOrders(extra.labOrders || []);
+          setRemoteRadiologyOrders(extra.radiologyOrders || []);
+        })
+        .catch(() => undefined);
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, token, facilityCode]);
+
   const queryText = searchQuery.trim().toLowerCase();
-  const visiblePharmacyOrders = useMemo(() => workspace.pharmacyOrders.filter((order) => !queryText || `${order.patientName} ${order.mrNumber} ${order.items.map((item) => item.medicationName).join(' ')}`.toLowerCase().includes(queryText)), [workspace.pharmacyOrders, queryText]);
-  const visibleLabOrders = useMemo(() => workspace.labOrders.filter((order) => !queryText || `${order.patientName} ${order.mrNumber} ${order.specimenCode} ${order.clinicalNotes}`.toLowerCase().includes(queryText)), [workspace.labOrders, queryText]);
+  const visiblePharmacyOrders = useMemo(() => mergeRowsById(workspace.pharmacyOrders, remotePharmacyOrders).filter((order) => !queryText || `${order.patientName} ${order.mrNumber} ${order.items.map((item) => item.medicationName).join(' ')}`.toLowerCase().includes(queryText)), [workspace.pharmacyOrders, remotePharmacyOrders, queryText]);
+  const visibleLabOrders = useMemo(() => mergeRowsById(workspace.labOrders, remoteLabOrders).filter((order) => !queryText || `${order.patientName} ${order.mrNumber} ${order.specimenCode} ${order.clinicalNotes}`.toLowerCase().includes(queryText)), [workspace.labOrders, remoteLabOrders, queryText]);
   const visiblePurchaseOrders = useMemo(() => (workspace.purchaseOrders || []).filter((order) => !queryText || `${order.poNumber || ''} ${order.supplierName || ''} ${order.status || ''}`.toLowerCase().includes(queryText)), [workspace.purchaseOrders, queryText]);
-  const visibleRadiologyOrders = useMemo(() => (workspace.radiologyOrders || []).filter((order) => !queryText || `${order.patientName || ''} ${order.examName || ''} ${order.accessionNumber || ''}`.toLowerCase().includes(queryText)), [workspace.radiologyOrders, queryText]);
+  const visibleRadiologyOrders = useMemo(() => mergeRowsById(workspace.radiologyOrders || [], remoteRadiologyOrders).filter((order) => !queryText || `${order.patientName || ''} ${order.examName || ''} ${order.accessionNumber || ''}`.toLowerCase().includes(queryText)), [workspace.radiologyOrders, remoteRadiologyOrders, queryText]);
   const orderPage = usePage(visiblePharmacyOrders);
   const opnamePage = usePage(stockOpnameRows);
   const mutationPage = usePage(filteredMutations);
@@ -345,6 +391,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
     if (!selectedLabOrder) return;
     const fresh = workspace.labOrders.find((order) => order.id === selectedLabOrder.id);
     if (!fresh) {
+      if (remoteLabOrders.some((order) => order.id === selectedLabOrder.id)) return;
       setSelectedLabOrder(null);
       setLabValues({});
       setLabNotes('');
@@ -360,7 +407,7 @@ export const PharmacyAndLabModule: React.FC<PharmacyAndLabModuleProps> = ({
         source: parameter.referenceSource || '', context: parameter.methodPopulation || '', verified: parameter.referenceVerified === true,
       }])));
     }
-  }, [workspace.labOrders, selectedLabOrder]);
+  }, [workspace.labOrders, selectedLabOrder, remoteLabOrders]);
 
   const selectLabForEdit = (order: LabOrder) => {
     setSelectedLabOrder(order);

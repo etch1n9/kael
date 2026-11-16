@@ -104,6 +104,7 @@ pub fn handle(
             source
         };
         snapshot["configId"] = json!(format!("cfg-{code}-v{version}"));
+        snapshot["id"] = snapshot["configId"].clone();
         snapshot["facilityCode"] = json!(code);
         snapshot["configVersion"] = json!(version);
         snapshot["lifecycleStage"] = json!("ACTIVE");

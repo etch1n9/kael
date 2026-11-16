@@ -174,8 +174,64 @@ pub fn handle(
         if let Some(invoice_id) = rest.strip_suffix("/items") {
             return Some(add_item(app, ctx, invoice_id, body));
         }
+        if let Some(invoice_id) = rest.strip_suffix("/components") {
+            return Some(component_action(app, ctx, invoice_id, body));
+        }
     }
     None
+}
+
+fn component_action(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> ApiResult {
+    require_service(app, ctx, &["KASIR_AKUNTANSI"], &["SUB_CASHIER_BILLING_DEPOSIT"])?;
+    let index = invoice_index(app, ctx, invoice_id)?;
+    let mut invoice = array(&app.db, "invoices")[index].clone();
+    if text(&invoice, "status") != "BELUM_LUNAS" {
+        return Err(conflict("Komponen hanya dapat diubah pada tagihan yang belum diselesaikan."));
+    }
+    let component_id = text(body, "id");
+    if component_id.is_empty() {
+        return Err(bad_request("ID komponen tagihan wajib diisi."));
+    }
+    let action = text(body, "action");
+    let mut items = array(&invoice, "items").clone();
+    let mut unpriced = array(&invoice, "unpricedItems").clone();
+    let found = items.iter().any(|item| text(item, "id") == component_id)
+        || unpriced.iter().any(|item| text(item, "id") == component_id || text(item, "key") == component_id);
+    if !found {
+        return Err(bad_request("Komponen tagihan tidak dikenal."));
+    }
+    let audit_action;
+    match action {
+        "cancel" => {
+            items.retain(|item| text(item, "id") != component_id);
+            unpriced.retain(|item| text(item, "id") != component_id && text(item, "key") != component_id);
+            audit_action = "CASHIER_COMPONENT_CANCEL";
+        }
+        "adjust" => {
+            let quantity = body["quantity"].as_f64().filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| bad_request("Kuantitas baru harus berupa angka lebih dari nol."))?;
+            let Some(item) = items.iter_mut().find(|item| text(item, "id") == component_id) else {
+                return Err(bad_request("Komponen yang belum berharga tidak dapat diubah jumlahnya sebelum harga ditetapkan."));
+            };
+            let price = number(item, "unitPrice");
+            if !(quantity * price).is_finite() {
+                return Err(bad_request("Nilai komponen melebihi batas angka yang dapat dicatat."));
+            }
+            item["quantity"] = json!(quantity);
+            item["subtotal"] = json!((quantity * price).round());
+            audit_action = "CASHIER_COMPONENT_ADJUST";
+        }
+        _ => return Err(bad_request("Aksi komponen tagihan tidak valid.")),
+    }
+    let discount = number(&invoice, "discountAmount");
+    invoice["items"] = json!(items);
+    invoice["unpricedItems"] = json!(unpriced);
+    invoice["pricingStatus"] = json!(if unpriced.is_empty() { "COMPLETE" } else { "PENDING" });
+    recalculate(&mut invoice, discount);
+    array_mut(&mut app.db, "invoices")[index] = invoice.clone();
+    audit(app, ctx, audit_action, text(&invoice, "invoiceNumber"), &format!("Komponen {component_id} aksi {action}."));
+    save(app)?;
+    json_response(200, invoice)
 }
 
 fn invoice_index(

@@ -188,7 +188,7 @@ export const OwnerFinanceModule: React.FC<OwnerFinanceModuleProps> = ({
   }, [workspace]);
 
   const doctorFeeSummaries = useMemo(() => workspace.doctors.map((doctor) => {
-    const visits = workspace.visits.filter((visit) => visit.doctorId === doctor.id);
+    const visits = workspace.visits.filter((visit) => (visit.handoffToDoctorId ? visit.handoffToDoctorId : visit.doctorId) === doctor.id);
     const visitIds = new Set(visits.map((visit) => visit.id));
     const invoices = workspace.invoices.filter((invoice) => visitIds.has(invoice.visitId) && invoice.pricingStatus !== 'PENDING');
     const medicalServiceRevenue = invoices.reduce((total, invoice) => total + invoice.items

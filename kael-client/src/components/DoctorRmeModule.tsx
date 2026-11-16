@@ -14,6 +14,7 @@ import {
 import {
   ClinicalProcedureItem,
   OdontogramEntry,
+  Patient,
   PrescriptionItem,
   SoapRecord,
   ToothCondition,
@@ -83,10 +84,14 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
     return workspace.visits[0];
   }, [workspace.visits, selectedVisitId]);
 
+  const [resolvedPatient, setResolvedPatient] = useState<Patient | null>(null);
+
   const activePatient = useMemo(() => {
     if (!activeVisit) return undefined;
-    return workspace.patients.find((p) => p.id === activeVisit.patientId);
-  }, [workspace.patients, activeVisit]);
+    const fromWorkspace = workspace.patients.find((p) => p.id === activeVisit.patientId);
+    if (fromWorkspace) return fromWorkspace;
+    return resolvedPatient?.id === activeVisit.patientId ? resolvedPatient : undefined;
+  }, [workspace.patients, activeVisit, resolvedPatient]);
 
   const existingSoap = useMemo(() => {
     if (!activeVisit) return undefined;
@@ -212,6 +217,36 @@ export const DoctorRmeModule: React.FC<DoctorRmeModuleProps> = ({
       setLabRequestedParams([]);
     }
   }, [activeVisit?.id, existingSoap?.id]);
+
+  useEffect(() => {
+    if (!activeVisit) return;
+    const patientId = activeVisit.patientId;
+    if (workspace.patients.some((patient) => patient.id === patientId)) return;
+    if (resolvedPatient?.id === patientId) return;
+    const query = activeVisit.mrNumber || activeVisit.patientName;
+    if (!query) return;
+    const controller = new AbortController();
+    let ignore = false;
+    kaelApi.searchRecords(token, facilityCode, query, controller.signal)
+      .then((found) => {
+        if (ignore) return;
+        const match = (found.patients || []).find((patient) => patient.id === patientId) ?? null;
+        setResolvedPatient((current) => (current?.id === match?.id ? current : match));
+      })
+      .catch(() => {
+        if (!ignore) setResolvedPatient((current) => (current?.id === patientId ? current : null));
+      });
+    return () => {
+      ignore = true;
+      controller.abort();
+    };
+  }, [activeVisit?.id, token, facilityCode, workspace.patients, resolvedPatient]);
+
+  useEffect(() => {
+    if (!activeVisit || existingSoap) return;
+    if (!resolvedPatient || resolvedPatient.id !== activeVisit.patientId) return;
+    setPastMedicalHistory((current) => current || resolvedPatient.chronicConditions.join(', ') || '');
+  }, [activeVisit?.id, existingSoap, resolvedPatient]);
 
   const bmiData = [vitals.weightKg, vitals.heightCm].every((value) => Number.isFinite(value) && value > 0)
     ? calculateBMI(vitals.weightKg, vitals.heightCm) : null;

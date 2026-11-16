@@ -26,6 +26,7 @@ interface DataExportToolbarProps<T = Record<string, unknown>> {
   facilityCode: string;
   columns: ExportColumn<T>[];
   rows: T[];
+  resolveRows?: () => Promise<T[]>;
   compact?: boolean;
   contextLabel?: string;
 }
@@ -38,11 +39,14 @@ export function DataExportToolbar<T = Record<string, unknown>>({
   facilityCode,
   columns,
   rows,
+  resolveRows,
   compact = false,
   contextLabel = 'Ekspor Tabel:',
 }: DataExportToolbarProps<T>) {
   const [showPdfPreview, setShowPdfPreview] = useState(false);
+  const [previewRows, setPreviewRows] = useState<T[] | null>(null);
   const [feedbackToast, setFeedbackToast] = useState<string | null>(null);
+  const shownRows = previewRows ?? rows;
 
   const payload: ExportDocumentPayload<T> = {
     title,
@@ -59,10 +63,13 @@ export function DataExportToolbar<T = Record<string, unknown>>({
     setTimeout(() => setFeedbackToast(null), 3200);
   };
 
-  const handleDownloadPdf = () => {
-    const result = exportToPdf(payload);
+  const rowsForExport = async () => (resolveRows ? resolveRows() : rows);
+
+  const handleDownloadPdf = async () => {
+    const exported = await rowsForExport();
+    const result = exportToPdf({ ...payload, rows: exported });
     const formatLabel = result.format === 'csv' ? 'CSV' : 'PDF';
-    triggerNotice(`${formatLabel} dengan ${rows.length} baris disiapkan untuk diunduh.`);
+    triggerNotice(`${formatLabel} dengan ${exported.length} baris disiapkan untuk diunduh.`);
   };
 
   return (
@@ -80,7 +87,11 @@ export function DataExportToolbar<T = Record<string, unknown>>({
 
         <button
           type="button"
-          onClick={() => setShowPdfPreview(true)}
+          onClick={() => {
+            setPreviewRows(null);
+            setShowPdfPreview(true);
+            void rowsForExport().then(setPreviewRows);
+          }}
           title="Pratinjau & Unduh PDF"
           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-caption font-mono font-semibold border border-[#C8DDD7] dark:border-[#1E473F] bg-white dark:bg-[#0D2823] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#00897B] hover:text-white hover:border-[#00897B] transition-colors cursor-pointer"
         >
@@ -90,9 +101,10 @@ export function DataExportToolbar<T = Record<string, unknown>>({
 
         <button
           type="button"
-          onClick={() => {
-            exportToExcelXml(payload);
-            triggerNotice(`Excel XML dengan ${rows.length} baris disiapkan untuk diunduh.`);
+          onClick={async () => {
+            const exported = await rowsForExport();
+            exportToExcelXml({ ...payload, rows: exported });
+            triggerNotice(`Excel XML dengan ${exported.length} baris disiapkan untuk diunduh.`);
           }}
           title="Ekspor Excel XML (.xml)"
           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-caption font-mono font-semibold border border-[#C8DDD7] dark:border-[#1E473F] bg-white dark:bg-[#0D2823] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#00897B] hover:text-white hover:border-[#00897B] transition-colors cursor-pointer"
@@ -103,9 +115,10 @@ export function DataExportToolbar<T = Record<string, unknown>>({
 
         <button
           type="button"
-          onClick={() => {
-            exportToCsv(payload);
-            triggerNotice(`CSV dengan ${rows.length} baris disiapkan untuk diunduh.`);
+          onClick={async () => {
+            const exported = await rowsForExport();
+            exportToCsv({ ...payload, rows: exported });
+            triggerNotice(`CSV dengan ${exported.length} baris disiapkan untuk diunduh.`);
           }}
           title="Ekspor ke CSV"
           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-caption font-mono font-semibold border border-[#C8DDD7] dark:border-[#1E473F] bg-white dark:bg-[#0D2823] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#00897B] hover:text-white hover:border-[#00897B] transition-colors cursor-pointer"
@@ -116,9 +129,10 @@ export function DataExportToolbar<T = Record<string, unknown>>({
 
         <button
           type="button"
-          onClick={() => {
-            exportToDocs(payload);
-            triggerNotice(`Dokumen dengan ${rows.length} baris disiapkan untuk diunduh.`);
+          onClick={async () => {
+            const exported = await rowsForExport();
+            exportToDocs({ ...payload, rows: exported });
+            triggerNotice(`Dokumen dengan ${exported.length} baris disiapkan untuk diunduh.`);
           }}
           title="Ekspor ke Dokumen Word"
           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-caption font-mono font-semibold border border-[#C8DDD7] dark:border-[#1E473F] bg-white dark:bg-[#0D2823] text-[#0F2922] dark:text-[#E6F4F1] hover:bg-[#00897B] hover:text-white hover:border-[#00897B] transition-colors cursor-pointer"
@@ -159,7 +173,7 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                 </button>
                 <button
                   type="button"
-                  onClick={() => printDocumentIsolated(payload)}
+                  onClick={() => printDocumentIsolated({ ...payload, rows: shownRows })}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-[#B9D1C9] bg-white hover:bg-[#EAF3F0] text-[#0F2922] text-xs font-semibold transition-colors cursor-pointer"
                 >
                   <Printer className="w-4 h-4 text-[#00897B]" />
@@ -196,7 +210,7 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                 </div>
                 <div className="text-right text-xs text-[#52736B] font-mono">
                   <div>Dibuat: {new Date().toLocaleString('id-ID')}</div>
-                  <div>Total Data: {rows.length} baris</div>
+                  <div>Total Data: {shownRows.length} baris</div>
                 </div>
               </div>
 
@@ -215,7 +229,7 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.length === 0 ? (
+                    {shownRows.length === 0 ? (
                       <tr>
                         <td
                           colSpan={columns.length}
@@ -225,7 +239,7 @@ export function DataExportToolbar<T = Record<string, unknown>>({
                         </td>
                       </tr>
                     ) : (
-                      rows.map((row, rIdx) => (
+                      shownRows.map((row, rIdx) => (
                         <tr
                           key={rIdx}
                           className={rIdx % 2 === 0 ? 'bg-white' : 'bg-[#F4F9F7]'}

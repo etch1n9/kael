@@ -551,6 +551,7 @@ export interface VisitQueueItem {
   polyclinic: string;
   doctorId: string;
   doctorName: string;
+  handoffToDoctorId?: string;
   guarantor: string;
   bpjsSepOrPcareNo?: string;
   visitType?: 'KUNJUNGAN_SAKIT' | 'KUNJUNGAN_SEHAT' | 'IGD_DARURAT' | 'RAWAT_INAP';

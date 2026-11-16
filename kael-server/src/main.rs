@@ -56,6 +56,7 @@ async fn run() -> Result<(), String> {
         store,
         db,
         sessions,
+        sessions_digest: 0,
         login_failures: HashMap::new(),
     };
     let router = axum::Router::new()

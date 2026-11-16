@@ -5,7 +5,9 @@ use axum::response::{IntoResponse, Response};
 use chrono::{SecondsFormat, Utc};
 use serde_json::{Value, json};
 use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -22,6 +24,7 @@ pub struct App {
     pub store: Storage,
     pub db: Value,
     pub sessions: HashMap<String, Session>,
+    pub sessions_digest: u64,
     pub login_failures: HashMap<String, LoginAttempt>,
 }
 
@@ -289,7 +292,8 @@ fn cap_sessions(app: &mut App) {
 
 pub fn save(app: &mut App) -> Result<(), ApiError> {
     cap_sessions(app);
-    let packed = app
+    let digest = sessions_digest(&app.sessions);
+    let packed: HashMap<String, (String, String, i64)> = app
         .sessions
         .iter()
         .map(|(token, session)| {
@@ -303,7 +307,12 @@ pub fn save(app: &mut App) -> Result<(), ApiError> {
             )
         })
         .collect();
-    if let Err(message) = app.store.save_all(&app.db, &packed) {
+    let saved = if digest == app.sessions_digest {
+        app.store.save(&app.db)
+    } else {
+        app.store.save_all(&app.db, &packed)
+    };
+    if let Err(message) = saved {
         let loaded = app.store.reload();
         if let Ok(value) = loaded {
             app.db = value;
@@ -312,8 +321,23 @@ pub fn save(app: &mut App) -> Result<(), ApiError> {
         eprintln!("KAEL gagal menyimpan database: {message}");
         return Err(error(500, "Permintaan gagal disimpan server."));
     }
+    app.sessions_digest = digest;
     let _ = take_dirty();
     Ok(())
+}
+
+fn sessions_digest(sessions: &HashMap<String, Session>) -> u64 {
+    let mut tokens: Vec<_> = sessions.iter().collect();
+    tokens.sort_by(|left, right| left.0.cmp(right.0));
+    let mut hasher = DefaultHasher::new();
+    for (token, session) in tokens {
+        token.hash(&mut hasher);
+        session.user_id.hash(&mut hasher);
+        session.facility_code.hash(&mut hasher);
+        session.expires_at.hash(&mut hasher);
+    }
+    let digest = hasher.finish();
+    if digest == 0 { 1 } else { digest }
 }
 
 pub fn revoke_sessions(app: &mut App, user_id: &str) {
@@ -385,6 +409,7 @@ fn authorize(app: &mut App, headers: &HeaderMap, path: &str) -> Result<RequestCo
     if facility_code.is_empty() && text(&user, "role") == "SUPERUSER" {
         if !(path == "/api/workspace"
             || path == "/api/search"
+            || path == "/api/records"
             || path == "/api/admin/export-backup"
             || path == "/api/auth/logout"
             || path == "/api/auth/switch-facility"
@@ -965,8 +990,70 @@ fn search_records(app: &App, context: &RequestContext, query: &str) -> Value {
     json!({
         "patients": find("patients", patient_access, &["fullName", "mrNumber", "nik", "phone", "bpjsNumber"]),
         "visits": find("visits", visit_access, &["patientName", "mrNumber", "nik", "queueNumber", "registrationNumber"]),
-        "invoices": find("invoices", finance, &["patientName", "mrNumber", "invoiceNumber"])
+        "invoices": find("invoices", finance, &["patientName", "mrNumber", "invoiceNumber"]),
+        "pharmacyOrders": find("pharmacyOrders", has_any(&["APOTEK", "RME_DOKTER"]), &["patientName", "mrNumber"]),
+        "labOrders": find("labOrders", has_any(&["LABORATORIUM", "RME_DOKTER"]), &["patientName", "mrNumber", "specimenCode"]),
+        "radiologyOrders": find("radiologyOrders", has_any(&["RADIOLOGI_RIS", "RME_DOKTER"]), &["patientName", "mrNumber", "examName", "accessionNumber"])
     })
+}
+
+fn record_page(app: &App, context: &RequestContext, query: &str) -> ApiResult {
+    let code = context.facility_code.as_str();
+    if code.is_empty() {
+        return Err(forbidden("Pilih fasilitas aktif sebelum membaca data operasional."));
+    }
+    let mut collection = String::new();
+    let mut offset = 0usize;
+    let mut limit = 500usize;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = query_unescape(parts.next().unwrap_or(""));
+        match key {
+            "collection" => collection = value,
+            "offset" => offset = value.parse::<usize>().unwrap_or(0),
+            "limit" => limit = value.parse::<usize>().unwrap_or(500).clamp(1, 500),
+            _ => {}
+        }
+    }
+    let user = &context.user;
+    let has_any = |modules: &[&str]| modules.iter().any(|module| allows(app, user, code, module));
+    let identity = has_any(&["SEMUA_PASIEN", "PENDAFTARAN", "RME_DOKTER", "RAWAT_INAP", "IGD_TRIASE_EWS", "LABORATORIUM", "RADIOLOGI_RIS", "KIA_IMUNISASI", "GIGI_ODONTOGRAM", "PROLANIS_PRB", "BEDAH_IBS", "MCU_SURAT_MEDIS", "APOTEK"]);
+    let allowed = match collection.as_str() {
+        "patients" => has_any(&["SEMUA_PASIEN", "PENDAFTARAN", "RME_DOKTER", "RAWAT_INAP", "IGD_TRIASE_EWS", "KASIR_AKUNTANSI", "LABORATORIUM", "RADIOLOGI_RIS"]),
+        "visits" => has_any(&["SEMUA_PASIEN", "PENDAFTARAN", "RME_DOKTER", "RAWAT_INAP", "IGD_TRIASE_EWS", "JADWAL_DOKTER", "APOTEK", "KASIR_AKUNTANSI"]),
+        "soapRecords" => has_any(&["RME_DOKTER", "SEMUA_PASIEN"]),
+        "beds" => has_any(&["RAWAT_INAP"]),
+        "medications" => has_any(&["APOTEK", "KATALOG_OPNAME", "MUTASI_STOK", "PENGADAAN_PBF", "RME_DOKTER"]),
+        "pharmacyOrders" => has_any(&["APOTEK", "RME_DOKTER"]),
+        "labOrders" => has_any(&["LABORATORIUM", "RME_DOKTER"]),
+        "radiologyOrders" => has_any(&["RADIOLOGI_RIS", "RME_DOKTER"]),
+        "invoices" => has_any(&["KASIR_AKUNTANSI", "KEUANGAN_OWNER", "NERACA_GL", "KLAIM_BPJS_PIUTANG", "JASA_MEDIS_REMUN"]),
+        "purchaseOrders" => has_any(&["PENGADAAN_PBF", "KEUANGAN_OWNER", "NERACA_GL"]),
+        _ => return Err(bad_request("Koleksi tidak dikenal.")),
+    };
+    if !allowed {
+        return Err(forbidden("Tidak memiliki akses ke koleksi ini."));
+    }
+    let mut rows: Vec<Value> = array(&app.db, &collection)
+        .iter()
+        .filter(|entry| text(entry, "facilityCode") == code)
+        .cloned()
+        .collect();
+    let redact = !identity && has_any(&["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG"]);
+    if redact && matches!(collection.as_str(), "patients" | "visits") {
+        for row in &mut rows {
+            if let Some(object) = row.as_object_mut() {
+                for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals"] {
+                    object.remove(field);
+                }
+            }
+        }
+    }
+    let total = rows.len();
+    rows.sort_by(|left, right| stamp_of(right).cmp(&stamp_of(left)).then_with(|| text(right, "id").cmp(text(left, "id"))));
+    let rows: Vec<Value> = rows.into_iter().skip(offset).take(limit).collect();
+    json_response(200, json!({"rows": rows, "total": total}))
 }
 
 fn dispatch(
@@ -1006,6 +1093,9 @@ fn dispatch(
     }
     if method == "GET" && path == "/api/search" {
         return json_response(200, search_records(app, &context, query));
+    }
+    if method == "GET" && path == "/api/records" {
+        return record_page(app, &context, query);
     }
     if method == "GET" && path == "/api/admin/export-backup" {
         require_superuser(&context)?;

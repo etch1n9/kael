@@ -259,6 +259,14 @@ export const kaelApi = {
       facilityCode
     ),
 
+  listRecords: <T,>(token: string, facilityCode: string, collection: string, offset: number) =>
+    requestJson<{ rows: T[]; total: number }>(
+      `/records?collection=${encodeURIComponent(collection)}&offset=${offset}&limit=500`,
+      { method: 'GET' },
+      token,
+      facilityCode
+    ),
+
   exportBackup: (token: string) =>
     requestJson<Record<string, unknown>>('/admin/export-backup', { method: 'GET' }, token),
 

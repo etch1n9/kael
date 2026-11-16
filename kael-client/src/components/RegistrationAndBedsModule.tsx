@@ -121,6 +121,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
   const [mpiGenderFilter, setMpiGenderFilter] = useState<'ALL' | 'L' | 'P'>('ALL');
   const [mpiBloodFilter, setMpiBloodFilter] = useState<string>('ALL');
   const [mpiAllergyFilter, setMpiAllergyFilter] = useState<'ALL' | 'HAS_ALLERGY'>('ALL');
+  const [remotePatients, setRemotePatients] = useState<Patient[]>([]);
 
   // MPI Patient Standalone Create / Edit Form State
   const [editingPatientId, setEditingPatientId] = useState<string | null>(null);
@@ -158,8 +159,36 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
   const [newBedRate, setNewBedRate] = useState<number | ''>('');
 
   // Live Multi-Field Patient Database Auto-Matcher
+  useEffect(() => {
+    const query = mpiSearchQuery.trim();
+    if (query.length < 2) {
+      setRemotePatients([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      kaelApi.searchRecords(token, activeFacility.code, query, controller.signal)
+        .then((found) => {
+          if (!controller.signal.aborted) setRemotePatients(found.patients || []);
+        })
+        .catch(() => undefined);
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [mpiSearchQuery, token, activeFacility.code]);
+
+  const patientsForSearch = useMemo(() => {
+    const byId = new Map(patients.map((patient) => [patient.id, patient]));
+    for (const extra of remotePatients) {
+      if (!byId.has(extra.id)) byId.set(extra.id, extra);
+    }
+    return Array.from(byId.values());
+  }, [patients, remotePatients]);
+
   const livePatientCandidates = useMemo(() => {
-    return findMatchingPatients(patients, {
+    return findMatchingPatients(patientsForSearch, {
       fullName: regFullName,
       nik: regNik,
       bpjsNumber: regBpjs,
@@ -169,7 +198,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
       address: regAddress,
     });
   }, [
-    patients,
+    patientsForSearch,
     regFullName,
     regNik,
     regBpjs,
@@ -220,7 +249,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
   // Also check live matches in MPI standalone tab when typing Name / NIK / Address / Birthdate
   const mpiLiveDuplicates = useMemo(() => {
     if (editingPatientId) return [];
-    return findMatchingPatients(patients, {
+    return findMatchingPatients(patientsForSearch, {
       fullName: mpiFullName,
       nik: mpiNik,
       bpjsNumber: mpiBpjs,
@@ -231,7 +260,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
     });
   }, [
     editingPatientId,
-    patients,
+    patientsForSearch,
     mpiFullName,
     mpiNik,
     mpiBpjs,
@@ -243,7 +272,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
 
   const filteredPatients = useMemo(() => {
     const q = mpiSearchQuery.trim().toLowerCase();
-    return patients.filter((p) => {
+    return patientsForSearch.filter((p) => {
       if (mpiGenderFilter !== 'ALL' && p.gender !== mpiGenderFilter) return false;
       if (mpiBloodFilter !== 'ALL' && p.bloodType !== mpiBloodFilter) return false;
       if (mpiAllergyFilter === 'HAS_ALLERGY' && p.allergies.length === 0) return false;
@@ -253,7 +282,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
       }
       return true;
     });
-  }, [patients, mpiSearchQuery, mpiGenderFilter, mpiBloodFilter, mpiAllergyFilter]);
+  }, [patientsForSearch, mpiSearchQuery, mpiGenderFilter, mpiBloodFilter, mpiAllergyFilter]);
 
   const filteredVisits = useMemo(() => {
     const q = queueSearch.trim().toLowerCase();
@@ -878,7 +907,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                         const val = e.target.value.replace(/\D/g, '');
                         setRegNik(val);
                         if (val.length === 16) {
-                          const exact = patients.find((p) => p.nik === val);
+                          const exact = patientsForSearch.find((p) => p.nik === val);
                           if (exact) {
                             applyMatchedPatientToForm(exact);
                           }
@@ -905,7 +934,7 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                         const val = e.target.value;
                         setRegBpjs(val);
                         if (val.trim().length >= 8) {
-                          const exactBpjs = patients.find(
+                          const exactBpjs = patientsForSearch.find(
                             (p) => p.bpjsNumber && p.bpjsNumber === val.trim()
                           );
                           if (exactBpjs) {

@@ -606,6 +606,18 @@ export function AllPatientsModule({
               facilityCode={activeFacility.code}
               columns={exportColumns}
               rows={filteredPatients}
+              resolveRows={async () => {
+                if (searchQuery.trim() || activeFilterCount > 0) return filteredPatients;
+                const all: Patient[] = [];
+                let offset = 0;
+                for (;;) {
+                  const page = await kaelApi.listRecords<Patient>(token, activeFacility.code, 'patients', offset);
+                  all.push(...page.rows);
+                  offset += page.rows.length;
+                  if (page.rows.length < 500 || offset >= page.total) break;
+                }
+                return all;
+              }}
               compact
               contextLabel="Ekspor Tabel Pasien"
             />

@@ -61,6 +61,7 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
 
   // Filters for Cashier Invoices & Bridging
   const [invSearch, setInvSearch] = useState('');
+  const [remoteInvoices, setRemoteInvoices] = useState<InvoiceRecord[]>([]);
   const [invStatusFilter, setInvStatusFilter] = useState<string>('ALL');
   const [invGuarantorFilter, setInvGuarantorFilter] = useState<string>('ALL');
   const [bridgingGatewayFilter, setBridgingGatewayFilter] = useState<string>('ALL');
@@ -98,9 +99,35 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
     setSelectedBridgingLog((current) => current ? workspace.bridgingLogs.find((entry) => entry.id === current.id) || null : current);
   }, [workspace.bridgingLogs]);
 
+  useEffect(() => {
+    const q = invSearch.trim();
+    if (q.length < 2) {
+      setRemoteInvoices([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      kaelApi.searchRecords(token, facilityCode, q, controller.signal)
+        .then((found) => setRemoteInvoices((found as { invoices?: InvoiceRecord[] }).invoices || []))
+        .catch(() => undefined);
+    }, 250);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [invSearch, token, facilityCode]);
+
+  const invoiceSource = useMemo(() => {
+    const byId = new Map(workspace.invoices.map((invoice) => [invoice.id, invoice]));
+    for (const invoice of remoteInvoices) {
+      if (!byId.has(invoice.id)) byId.set(invoice.id, invoice);
+    }
+    return Array.from(byId.values());
+  }, [workspace.invoices, remoteInvoices]);
+
   const filteredInvoices = useMemo(() => {
     const q = invSearch.trim().toLowerCase();
-    return workspace.invoices.filter((inv) => {
+    return invoiceSource.filter((inv) => {
       if (invStatusFilter !== 'ALL' && inv.status !== invStatusFilter) return false;
       if (invGuarantorFilter !== 'ALL' && (invGuarantorFilter === 'BPJS' ? !isBpjsRecord(inv) : inv.guarantor !== invGuarantorFilter)) return false;
       if (q) {
@@ -109,7 +136,7 @@ export const CashierAndBridgingModule: React.FC<CashierAndBridgingModuleProps> =
       }
       return true;
     });
-  }, [workspace.invoices, invSearch, invStatusFilter, invGuarantorFilter]);
+  }, [invoiceSource, invSearch, invStatusFilter, invGuarantorFilter]);
   const invoicePage = usePage(filteredInvoices);
 
   const handlePayInvoice = async (e: React.FormEvent) => {

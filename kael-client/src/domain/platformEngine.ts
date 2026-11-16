@@ -1232,7 +1232,7 @@ export function computeErpCompleteFinancialAnalysis(params: {
     hppPharmacyCogs, cogsPharmacy: hppPharmacyCogs, hppMedicalFeeDirect: recordedMedicalFees, directDoctorFeeExpense: recordedMedicalFees,
     totalHpp: hppPharmacyCogs + recordedMedicalFees, grossProfit, grossMarginPct, grossMarginPercent: grossMarginPct, operatingExpenses,
     ebitda, estimatedTaxExpense: null, estimatedCorporateTax: null, estimatedDoctorTaxPph21: null,
-    netOperatingProfit: ebitda, netProfit: null, netMarginPct: null, netMarginPercent: null,
+    netOperatingProfit: ebitda, netProfit: ebitda, netMarginPct: recordedRatio(ebitda, totalRevenue), netMarginPercent: recordedRatio(ebitda, totalRevenue),
     balanceSheet: {
       cashAndBank: hasJournals ? (journalTotals['1-1100'] ?? journalTotals['1-1000'] ?? journalTotals['KAS'] ?? null) : null, accountsReceivablePatientsAndJkn: totalReceivables, accountsReceivable: totalReceivables,
       inventoryMedicationAssetHna: totalAssetHnaRp, inventoryAssetHna: totalAssetHnaRp, medicalEquipmentFixedAssets: null, totalAssets: null,
