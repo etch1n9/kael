@@ -1191,7 +1191,7 @@ mod tests {
         let db_path = root.join("test.sqlite");
         let seed = json!({
             "serverConfig": { "sessionTimeoutMinutes": 480 },
-            "users": [{ "id": "usr-1", "username": "fin", "fullName": "Finance Staff", "role": "ADMIN_KEUANGAN", "active": true }],
+            "users": [{ "id": "usr-1", "username": "fin", "fullName": "Finance Staff", "role": "ADMIN_KEUANGAN", "allowedFacilities": ["FAC1"], "active": true }],
             "facilities": [{ "code": "FAC1", "name": "RS Test", "type": "RSUD", "active": true }],
             "roles": [{ "id": "ADMIN_KEUANGAN", "active": true, "modules": ["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG"] }],
             "facilityConfigs": [{
@@ -1230,11 +1230,13 @@ mod tests {
         let (store, db) = Storage::load(&db_path).unwrap();
         let app = App {
             config: Config {
-                bind: "127.0.0.1".into(),
+                host: "127.0.0.1".into(),
                 port: 0,
-                db_path: db_path.clone(),
+                data_file: db_path.clone(),
                 web_root: None,
                 client_origins: vec![],
+                api_origins: vec![],
+                root: root.clone(),
             },
             store,
             db,
@@ -1243,7 +1245,7 @@ mod tests {
             login_failures: HashMap::new(),
         };
         let ctx = RequestContext {
-            user: json!({ "id": "usr-1", "username": "fin", "fullName": "Finance Staff", "role": "ADMIN_KEUANGAN" }),
+            user: json!({ "id": "usr-1", "username": "fin", "fullName": "Finance Staff", "role": "ADMIN_KEUANGAN", "allowedFacilities": ["FAC1"], "active": true }),
             facility_code: "FAC1".into(),
             token: "tok".into(),
         };

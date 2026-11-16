@@ -679,7 +679,6 @@ mod tests {
     use crate::config::Config;
     use crate::storage::Storage;
     use std::collections::HashMap;
-    use std::path::PathBuf;
 
     #[test]
     fn restock_idempotency_survives_retention_pruning_and_allows_distinct_entries() {
@@ -688,7 +687,7 @@ mod tests {
         let db_path = root.join("test.sqlite");
         let seed = json!({
             "serverConfig": { "sessionTimeoutMinutes": 480 },
-            "users": [{ "id": "usr-1", "username": "apt", "fullName": "Apoteker", "role": "APOTEKER", "active": true }],
+            "users": [{ "id": "usr-1", "username": "apt", "fullName": "Apoteker", "role": "APOTEKER", "allowedFacilities": ["FAC1"], "active": true }],
             "facilities": [{ "code": "FAC1", "name": "RS Test", "type": "RSUD", "active": true }],
             "roles": [{ "id": "APOTEKER", "active": true, "modules": ["APOTEK", "KATALOG_OPNAME", "MUTASI_STOK"] }],
             "facilityConfigs": [{
@@ -720,11 +719,13 @@ mod tests {
         let (store, db) = Storage::load(&db_path).unwrap();
         let mut app = App {
             config: Config {
-                bind: "127.0.0.1".into(),
+                host: "127.0.0.1".into(),
                 port: 0,
-                db_path: db_path.clone(),
+                data_file: db_path.clone(),
                 web_root: None,
                 client_origins: vec![],
+                api_origins: vec![],
+                root: root.clone(),
             },
             store,
             db,
@@ -733,7 +734,7 @@ mod tests {
             login_failures: HashMap::new(),
         };
         let ctx = RequestContext {
-            user: json!({ "id": "usr-1", "username": "apt", "fullName": "Apoteker", "role": "APOTEKER" }),
+            user: json!({ "id": "usr-1", "username": "apt", "fullName": "Apoteker", "role": "APOTEKER", "allowedFacilities": ["FAC1"], "active": true }),
             facility_code: "FAC1".into(),
             token: "tok".into(),
         };
