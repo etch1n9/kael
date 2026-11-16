@@ -409,9 +409,11 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
         }
         let existing = by_id.or(by_nik);
         if let Some(i) = existing {
-            let mut patient = array(&app.db, "patients")[i].clone();
-            update_fields(app, ctx, &mut patient, &incoming)?;
-            array_mut(&mut app.db, "patients")[i] = patient.clone();
+            let patient = array(&app.db, "patients")[i].clone();
+            let incoming_nik = text(&incoming, "nik").trim();
+            if !incoming_nik.is_empty() && incoming_nik != text(&patient, "nik") {
+                return Err(conflict("NIK tidak cocok dengan data master pasien yang dipilih."));
+            }
             patient
         } else {
             if !text(body, "patientId").is_empty() {
@@ -817,7 +819,16 @@ fn bed_action(
                 if let Some(value) = body.get("cpptNote").filter(|value| value.is_string()) {
                     let note = value.as_str().unwrap_or("").trim();
                     if !note.is_empty() {
-                        if text(&bed, "admissionId").is_empty() {
+                        let expected_admission = text(body, "admissionId").trim();
+                        let current_admission = text(&bed, "admissionId");
+                        if !current_admission.is_empty() && expected_admission != current_admission {
+                            return Err(conflict("Draf CPPT tidak cocok dengan admisi pasien yang sedang menempati tempat tidur ini."));
+                        }
+                        let expected_patient = text(body, "patientId").trim();
+                        if !expected_patient.is_empty() && expected_patient != text(&bed, "patientId") {
+                            return Err(conflict("Draf CPPT tidak cocok dengan pasien yang sedang menempati tempat tidur ini."));
+                        }
+                        if current_admission.is_empty() {
                             bed["admissionId"] = json!(id("adm"));
                         }
                         let stored: String = note.chars().take(4000).collect();
@@ -1066,12 +1077,19 @@ fn verify_lab(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value)
             && !matches!(text(other, "status"), "EXPERTISE_VERIFIED" | "BATAL")
     });
     if !pending && !support_open {
+        let visit_id = text(&order, "visitId");
+        let invoice_settled = array(&app.db, "invoices").iter().any(|inv| {
+            text(inv, "visitId") == visit_id
+                && text(inv, "facilityCode") == ctx.facility_code
+                && matches!(text(inv, "status"), "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI")
+        });
+        let next_visit_status = if invoice_settled { "SELESAI" } else { "KASIR" };
         for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|visit| {
-            text(visit, "id") == text(&order, "visitId")
+            text(visit, "id") == visit_id
                 && text(visit, "facilityCode") == ctx.facility_code
                 && text(visit, "status") == "FARMASI_LAB"
         }) {
-            visit["status"] = json!("KASIR");
+            visit["status"] = json!(next_visit_status);
             visit["updatedAt"] = json!(now());
         }
     }
@@ -1203,6 +1221,8 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     }
     if let Some(old) = &existing {
         let mut revision = old.clone();
+        revision["soapId"] = old["id"].clone();
+        revision["id"] = json!(id("srev"));
         revision["revisedAt"] = json!(timestamp);
         revision["revisedBy"] = ctx.user["id"].clone();
         revision["reason"] = json!(reason);
@@ -1307,6 +1327,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     }
     let mut items = vec![];
     let mut unpriced_items = vec![];
+    let mut handled_keys = std::collections::HashSet::new();
     let prior_items = prior_invoice
         .as_ref()
         .map(|invoice| array(invoice, "items").to_vec())
@@ -1317,8 +1338,22 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                      quantity: f64,
                      price: &Value|
      -> Result<(), ApiError> {
+        handled_keys.insert(key.to_owned());
         if price.is_null() {
-            unpriced_items.push(json!({"key":key,"category":category,"description":description,"quantity":quantity}));
+            if let Some(existing_item) = prior_items.iter().find(|item| text(item, "key") == key) {
+                let unit_price = n(existing_item, "unitPrice").round();
+                items.push(json!({
+                    "id": existing_item["id"].clone(),
+                    "key": key,
+                    "category": category,
+                    "description": description,
+                    "quantity": quantity,
+                    "unitPrice": unit_price,
+                    "subtotal": (quantity * unit_price).round()
+                }));
+            } else {
+                unpriced_items.push(json!({"key":key,"category":category,"description":description,"quantity":quantity}));
+            }
         } else if let Some(tariff) = price
             .as_f64()
             .filter(|number| number.is_finite() && *number >= 0.0)
@@ -1386,8 +1421,8 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     }
     if let Some(previous) = &prior_invoice {
         for item in array(previous, "items") {
-            let category = text(item, "category");
-            if matches!(category, "KAMAR_INAP" | "RADIOLOGI" | "LAINNYA") || text(item, "source") == "MANUAL" {
+            let item_key = text(item, "key");
+            if item_key.is_empty() || !handled_keys.contains(item_key) {
                 items.push(item.clone());
             }
         }

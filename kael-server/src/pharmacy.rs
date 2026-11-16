@@ -427,12 +427,19 @@ fn dispense(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -
             && !matches!(text(row, "status"), "EXPERTISE_VERIFIED" | "BATAL")
     });
     if !pending_lab && !pending_rad {
+        let visit_id = text(&order, "visitId");
+        let invoice_settled = array(&app.db, "invoices").iter().any(|inv| {
+            text(inv, "visitId") == visit_id
+                && text(inv, "facilityCode") == ctx.facility_code
+                && matches!(text(inv, "status"), "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI")
+        });
+        let next_visit_status = if invoice_settled { "SELESAI" } else { "KASIR" };
         for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
-            text(v, "id") == text(&order, "visitId")
+            text(v, "id") == visit_id
                 && text(v, "facilityCode") == ctx.facility_code
                 && text(v, "status") == "FARMASI_LAB"
         }) {
-            visit["status"] = json!("KASIR");
+            visit["status"] = json!(next_visit_status);
             visit["updatedAt"] = json!(now());
         }
     }

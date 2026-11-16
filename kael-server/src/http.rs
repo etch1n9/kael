@@ -291,11 +291,6 @@ fn cap_sessions(app: &mut App) {
 }
 
 fn prune_runtime_collections(app: &mut App) {
-    let audit_rows = array_mut(&mut app.db, "auditLogs");
-    if audit_rows.len() > 50_000 {
-        let excess = audit_rows.len() - 50_000;
-        audit_rows.drain(0..excess);
-    }
     let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
     let idem_rows = array_mut(&mut app.db, "idempotencyRecords");
     idem_rows.retain(|row| {
@@ -958,6 +953,7 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
                         }
                         if key == "visits" {
                             object.remove("vitals");
+                            object.remove("chiefComplaint");
                         }
                     }
                 }
@@ -1007,7 +1003,7 @@ fn search_records(app: &App, context: &RequestContext, query: &str) -> Value {
         if redact {
             for row in &mut rows {
                 if let Some(object) = row.as_object_mut() {
-                    for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals"] {
+                    for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals", "chiefComplaint"] {
                         object.remove(field);
                     }
                 }

@@ -302,6 +302,9 @@ fn radiology_verify(app: &mut App, ctx: &RequestContext, order_id: &str, body: &
     if text(&order, "status") == "BATAL" {
         return Err(conflict("Order radiologi yang dibatalkan tidak dapat diverifikasi."));
     }
+    if text(&order, "status") == "EXPERTISE_VERIFIED" {
+        return Err(conflict("Hasil radiologi sudah diverifikasi dan tidak dapat ditimpa."));
+    }
     let findings = alias(body, "findingsText", "findings").trim();
     let impression = alias(body, "impressionConclusion", "impression").trim();
     if findings.is_empty() {
@@ -468,6 +471,9 @@ fn surgery_update(app: &mut App, ctx: &RequestContext, schedule_id: &str, body: 
         .position(|row| text(row, "id") == schedule_id && text(row, "facilityCode") == ctx.facility_code)
         .ok_or_else(|| not_found("Jadwal operasi tidak ditemukan."))?;
     let mut record = array(&app.db, "surgicalSchedules")[index].clone();
+    if matches!(text(&record, "status"), "COMPLETED" | "CANCELLED") {
+        return Err(conflict("Jadwal operasi yang sudah selesai atau dibatalkan tidak dapat diubah kembali."));
+    }
     if let Some(sign_in) = body.get("whoSignInCompleted").and_then(Value::as_bool) {
         record["whoSignInCompleted"] = json!(sign_in);
     }
@@ -481,6 +487,13 @@ fn surgery_update(app: &mut App, ctx: &RequestContext, schedule_id: &str, body: 
     if !next_status.is_empty() {
         if !matches!(next_status, "SCHEDULED" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED") {
             return Err(bad_request("Status jadwal operasi tidak valid."));
+        }
+        if next_status == "COMPLETED"
+            && (record["whoSignInCompleted"] != true
+                || record["whoTimeOutCompleted"] != true
+                || record["whoSignOutCompleted"] != true)
+        {
+            return Err(conflict("Semua checklist keselamatan operasi WHO (Sign-In, Time-Out, Sign-Out) wajib diselesaikan sebelum menandai operasi selesai."));
         }
         record["status"] = json!(next_status);
     }

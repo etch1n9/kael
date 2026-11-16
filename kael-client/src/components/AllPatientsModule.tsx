@@ -220,7 +220,7 @@ export function AllPatientsModule({
     return Array.from(map.values());
   }, [patients, remotePatients]);
 
-  const filteredPatients = useMemo(() => {
+  const matchesPatientFilter = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const isDateWithinDays = (targetIsoDate: string, days: number) => {
       const targetMs = new Date(targetIsoDate).getTime();
@@ -234,7 +234,7 @@ export function AllPatientsModule({
       return ym === todayDate.slice(0, 7);
     };
 
-    return patientsForSearch.filter((p) => {
+    return (p: Patient) => {
       const stat = patientStatsMap.get(p.id);
       const regDate = localDateKey(p.createdAt || '');
 
@@ -306,9 +306,8 @@ export function AllPatientsModule({
       }
 
       return true;
-    });
+    };
   }, [
-    patientsForSearch,
     patientStatsMap,
     searchQuery,
     genderFilter,
@@ -323,6 +322,11 @@ export function AllPatientsModule({
     visitEndDate,
     todayDate,
   ]);
+
+  const filteredPatients = useMemo(
+    () => patientsForSearch.filter(matchesPatientFilter),
+    [patientsForSearch, matchesPatientFilter]
+  );
 
   const exportColumns: ExportColumn<Patient>[] = useMemo(
     () => [
@@ -607,7 +611,6 @@ export function AllPatientsModule({
               columns={exportColumns}
               rows={filteredPatients}
               resolveRows={async () => {
-                if (searchQuery.trim() || activeFilterCount > 0) return filteredPatients;
                 const all: Patient[] = [];
                 let offset = 0;
                 for (;;) {
@@ -616,7 +619,7 @@ export function AllPatientsModule({
                   offset += page.rows.length;
                   if (page.rows.length < 500 || offset >= page.total) break;
                 }
-                return all;
+                return all.filter(matchesPatientFilter);
               }}
               compact
               contextLabel="Ekspor Tabel Pasien"
