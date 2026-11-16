@@ -23,9 +23,9 @@ export function ModalDialog({ children, onClose, label, labelledBy, closeDisable
       dialog.style.top = `${viewport?.offsetTop || 0}px`;
       dialog.style.right = 'auto';
       dialog.style.bottom = 'auto';
-      dialog.style.inlineSize = `${viewport?.width || window.innerWidth}px`;
-      dialog.style.blockSize = `${viewport?.height || window.innerHeight}px`;
-      dialog.style.maxBlockSize = `${viewport?.height || window.innerHeight}px`;
+      dialog.style.inlineSize = `${viewport?.width || document.documentElement.clientWidth}px`;
+      dialog.style.blockSize = `${viewport?.height || document.documentElement.clientHeight}px`;
+      dialog.style.maxBlockSize = `${viewport?.height || document.documentElement.clientHeight}px`;
     };
     fitViewport();
     dialog.showModal();
