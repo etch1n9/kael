@@ -319,6 +319,38 @@ fn radiology_verify(app: &mut App, ctx: &RequestContext, order_id: &str, body: &
     order["radiologistName"] = ctx.user["fullName"].clone();
     order["verifiedAt"] = json!(timestamp);
     array_mut(&mut app.db, "radiologyOrders")[index] = order.clone();
+    let visit_id = text(&order, "visitId");
+    let pending_rx = array(&app.db, "pharmacyOrders").iter().any(|rx| {
+        text(rx, "visitId") == visit_id
+            && text(rx, "facilityCode") == ctx.facility_code
+            && !matches!(text(rx, "status"), "DISERAHKAN" | "BATAL")
+    });
+    let pending_lab = array(&app.db, "labOrders").iter().any(|lab| {
+        text(lab, "visitId") == visit_id
+            && text(lab, "facilityCode") == ctx.facility_code
+            && !matches!(text(lab, "status"), "SELESAI_VERIFIKASI" | "BATAL")
+    });
+    let pending_rad = array(&app.db, "radiologyOrders").iter().any(|rad| {
+        text(rad, "visitId") == visit_id
+            && text(rad, "facilityCode") == ctx.facility_code
+            && !matches!(text(rad, "status"), "EXPERTISE_VERIFIED" | "BATAL")
+    });
+    if !pending_rx && !pending_lab && !pending_rad {
+        let invoice_settled = array(&app.db, "invoices").iter().any(|inv| {
+            text(inv, "visitId") == visit_id
+                && text(inv, "facilityCode") == ctx.facility_code
+                && matches!(text(inv, "status"), "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI")
+        });
+        let next_visit_status = if invoice_settled { "SELESAI" } else { "KASIR" };
+        for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
+            text(v, "id") == visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "FARMASI_LAB"
+        }) {
+            visit["status"] = json!(next_visit_status);
+            visit["updatedAt"] = json!(timestamp);
+        }
+    }
     audit(
         app,
         ctx,

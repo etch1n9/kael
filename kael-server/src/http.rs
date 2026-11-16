@@ -1068,7 +1068,7 @@ fn record_page(app: &App, context: &RequestContext, query: &str) -> ApiResult {
     if redact && matches!(collection.as_str(), "patients" | "visits") {
         for row in &mut rows {
             if let Some(object) = row.as_object_mut() {
-                for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals"] {
+                for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals", "chiefComplaint"] {
                     object.remove(field);
                 }
             }

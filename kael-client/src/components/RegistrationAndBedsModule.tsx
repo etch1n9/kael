@@ -150,6 +150,8 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
     ''
   );
   const [cpptBedId, setCpptBedId] = useState<string | null>(null);
+  const [cpptAdmissionId, setCpptAdmissionId] = useState<string>('');
+  const [cpptPatientId, setCpptPatientId] = useState<string>('');
   const [cpptNote, setCpptNote] = useState<string>('');
   const [showAddBedForm, setShowAddBedForm] = useState(false);
   const [newBedCode, setNewBedCode] = useState('');
@@ -578,6 +580,22 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
     }
   };
 
+  useEffect(() => {
+    if (!cpptBedId) return;
+    const currentBed = beds.find((bed) => bed.id === cpptBedId);
+    if (
+      !currentBed ||
+      currentBed.status !== 'TERISI' ||
+      (cpptAdmissionId && currentBed.admissionId !== cpptAdmissionId) ||
+      (cpptPatientId && currentBed.patientId !== cpptPatientId)
+    ) {
+      setCpptBedId(null);
+      setCpptAdmissionId('');
+      setCpptPatientId('');
+      setCpptNote('');
+    }
+  }, [beds, cpptBedId, cpptAdmissionId, cpptPatientId]);
+
   const handleSaveCppt = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!cpptBedId) return;
@@ -585,9 +603,13 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
     try {
       await kaelApi.updateBedStatus(token, activeFacility.code, cpptBedId, {
         cpptNote: cpptNote.trim(),
-        admissionId: beds.find((bed) => bed.id === cpptBedId)?.admissionId,
+        admissionId: cpptAdmissionId,
+        patientId: cpptPatientId,
       });
       setCpptBedId(null);
+      setCpptAdmissionId('');
+      setCpptPatientId('');
+      setCpptNote('');
       await onRefreshWorkspace();
       setFeedbackMessage('Catatan Perkembangan Pasien Terintegrasi berhasil disimpan.');
     } catch (err) {
@@ -2413,6 +2435,8 @@ export const RegistrationAndBedsModule: React.FC<RegistrationAndBedsModuleProps>
                         type="button"
                         onClick={() => {
                           setCpptBedId(bed.id);
+                          setCpptAdmissionId(bed.admissionId || '');
+                          setCpptPatientId(bed.patientId || '');
                           setCpptNote(bed.diagnosis || '');
                         }}
                         className="py-2 px-3 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"

@@ -407,7 +407,14 @@ fn create_visit(app: &mut App, ctx: &RequestContext, body: &Value, unified: bool
         if by_id.is_some() && by_nik.is_some() && by_id != by_nik {
             return Err(conflict("Nomor identitas dan pasien yang dipilih bukan orang yang sama. Pendaftaran dihentikan."));
         }
-        let existing = by_id.or(by_nik);
+        let existing = if !requested_id.is_empty() {
+            if by_id.is_none() {
+                return Err(not_found("Pasien tidak ditemukan di fasilitas ini."));
+            }
+            by_id
+        } else {
+            by_nik
+        };
         if let Some(i) = existing {
             let patient = array(&app.db, "patients")[i].clone();
             let incoming_nik = text(&incoming, "nik").trim();
@@ -1422,7 +1429,11 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if let Some(previous) = &prior_invoice {
         for item in array(previous, "items") {
             let item_key = text(item, "key");
-            if item_key.is_empty() || !handled_keys.contains(item_key) {
+            let is_soap_managed = matches!(item_key, "registration" | "consultation")
+                || item_key.starts_with("procedure-")
+                || item_key.starts_with("rx-")
+                || item_key.starts_with("lab-");
+            if !is_soap_managed {
                 items.push(item.clone());
             }
         }

@@ -656,6 +656,7 @@ export const kaelApi = {
       attendingDoctor?: string;
       cpptNote?: string;
       admissionId?: string;
+      patientId?: string;
     }
   ) =>
     requestJson<InpatientBed>(

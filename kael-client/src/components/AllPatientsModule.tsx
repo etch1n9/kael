@@ -75,6 +75,8 @@ export function AllPatientsModule({
 }: AllPatientsModuleProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [remotePatients, setRemotePatients] = useState<Patient[]>([]);
+  const [fullPatients, setFullPatients] = useState<Patient[] | null>(null);
+  const [fullVisits, setFullVisits] = useState<VisitQueueItem[] | null>(null);
   const [regFilter, setRegFilter] = useState<RegDateFilter>('SEMUA');
   const [regStartDate, setRegStartDate] = useState('');
   const [regEndDate, setRegEndDate] = useState('');
@@ -143,6 +145,57 @@ export function AllPatientsModule({
     clinicalFlagFilter,
   ]);
 
+  useEffect(() => {
+    setFullPatients(null);
+    setFullVisits(null);
+  }, [activeFacility.code, patients.length, visits.length]);
+
+  useEffect(() => {
+    if (visitFilter === 'SEMUA' && polyFilter === 'ALL' && guarantorFilter === 'ALL' && regFilter === 'SEMUA' && genderFilter === 'ALL' && clinicalFlagFilter === 'ALL') return;
+    let cancelled = false;
+    const loadAll = async () => {
+      try {
+        if (!fullPatients) {
+          const allP: Patient[] = [];
+          let offset = 0;
+          for (;;) {
+            const page = await kaelApi.listRecords<Patient>(token, activeFacility.code, 'patients', offset);
+            allP.push(...page.rows);
+            offset += page.rows.length;
+            if (page.rows.length < 500 || offset >= page.total) break;
+          }
+          if (!cancelled) setFullPatients(allP);
+        }
+        if (!fullVisits) {
+          const allV: VisitQueueItem[] = [];
+          let offset = 0;
+          for (;;) {
+            const page = await kaelApi.listRecords<VisitQueueItem>(token, activeFacility.code, 'visits', offset);
+            allV.push(...page.rows);
+            offset += page.rows.length;
+            if (page.rows.length < 500 || offset >= page.total) break;
+          }
+          if (!cancelled) setFullVisits(allV);
+        }
+      } catch {
+        // fallback to workspace slices
+      }
+    };
+    void loadAll();
+    return () => {
+      cancelled = true;
+    };
+  }, [visitFilter, polyFilter, guarantorFilter, regFilter, genderFilter, clinicalFlagFilter, token, activeFacility.code, fullPatients, fullVisits]);
+
+  const effectiveVisits = useMemo(() => {
+    if (!fullVisits) return visits;
+    const map = new Map(visits.map((v) => [v.id, v]));
+    for (const v of fullVisits) {
+      if (!map.has(v.id)) map.set(v.id, v);
+    }
+    return Array.from(map.values());
+  }, [visits, fullVisits]);
+
   const patientStatsMap = useMemo(() => {
     const map = new Map<
       string,
@@ -158,26 +211,25 @@ export function AllPatientsModule({
       }
     >();
 
-    patients.forEach((p) => {
-      map.set(p.id, {
-        visitCount: 0,
-        lastVisitDate: null,
-        lastPoly: null,
-        lastGuarantor: null,
-        lastStatus: null,
-        visitDates: [],
-        polyclinics: new Set(),
-        guarantors: new Set(),
-      });
-    });
-
-    const sortedVisits = [...visits].sort((a, b) =>
+    const sortedVisits = [...effectiveVisits].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt)
     );
 
     sortedVisits.forEach((v) => {
-      const entry = map.get(v.patientId);
-      if (!entry) return;
+      let entry = map.get(v.patientId);
+      if (!entry) {
+        entry = {
+          visitCount: 0,
+          lastVisitDate: null,
+          lastPoly: null,
+          lastGuarantor: null,
+          lastStatus: null,
+          visitDates: [],
+          polyclinics: new Set(),
+          guarantors: new Set(),
+        };
+        map.set(v.patientId, entry);
+      }
       entry.visitCount += 1;
       const vDate = localDateKey(v.createdAt);
       entry.visitDates.push(vDate);
@@ -192,7 +244,7 @@ export function AllPatientsModule({
     });
 
     return map;
-  }, [patients, visits]);
+  }, [effectiveVisits]);
 
   useEffect(() => {
     const q = searchQuery.trim();
@@ -214,11 +266,14 @@ export function AllPatientsModule({
 
   const patientsForSearch = useMemo(() => {
     const map = new Map(patients.map((patient) => [patient.id, patient]));
+    for (const extra of fullPatients || []) {
+      if (!map.has(extra.id)) map.set(extra.id, extra);
+    }
     for (const extra of remotePatients) {
       if (!map.has(extra.id)) map.set(extra.id, extra);
     }
     return Array.from(map.values());
-  }, [patients, remotePatients]);
+  }, [patients, fullPatients, remotePatients]);
 
   const matchesPatientFilter = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -611,15 +666,79 @@ export function AllPatientsModule({
               columns={exportColumns}
               rows={filteredPatients}
               resolveRows={async () => {
-                const all: Patient[] = [];
-                let offset = 0;
+                const allPatients: Patient[] = [];
+                let pOffset = 0;
                 for (;;) {
-                  const page = await kaelApi.listRecords<Patient>(token, activeFacility.code, 'patients', offset);
-                  all.push(...page.rows);
-                  offset += page.rows.length;
-                  if (page.rows.length < 500 || offset >= page.total) break;
+                  const page = await kaelApi.listRecords<Patient>(token, activeFacility.code, 'patients', pOffset);
+                  allPatients.push(...page.rows);
+                  pOffset += page.rows.length;
+                  if (page.rows.length < 500 || pOffset >= page.total) break;
                 }
-                return all.filter(matchesPatientFilter);
+                const allVisits: VisitQueueItem[] = [];
+                let vOffset = 0;
+                for (;;) {
+                  const page = await kaelApi.listRecords<VisitQueueItem>(token, activeFacility.code, 'visits', vOffset);
+                  allVisits.push(...page.rows);
+                  vOffset += page.rows.length;
+                  if (page.rows.length < 500 || vOffset >= page.total) break;
+                }
+                setFullPatients(allPatients);
+                setFullVisits(allVisits);
+                const statsByPatient = new Map<string, { visitDates: string[]; polyclinics: Set<string>; guarantors: Set<string> }>();
+                for (const v of allVisits) {
+                  let st = statsByPatient.get(v.patientId);
+                  if (!st) {
+                    st = { visitDates: [], polyclinics: new Set(), guarantors: new Set() };
+                    statsByPatient.set(v.patientId, st);
+                  }
+                  st.visitDates.push(localDateKey(v.createdAt));
+                  st.polyclinics.add(v.polyclinic);
+                  st.guarantors.add(v.guarantor);
+                }
+                const q = searchQuery.trim().toLowerCase();
+                const isDateWithinDays = (targetIsoDate: string, days: number) => {
+                  const targetMs = new Date(targetIsoDate).getTime();
+                  const refRealMs = new Date(todayDate).getTime();
+                  const diffReal = (refRealMs - targetMs) / (1000 * 60 * 60 * 24);
+                  return diffReal >= 0 && diffReal < days;
+                };
+                const isSameMonth = (targetIsoDate: string) => targetIsoDate.slice(0, 7) === todayDate.slice(0, 7);
+                return allPatients.filter((p) => {
+                  const stat = statsByPatient.get(p.id);
+                  const regDate = localDateKey(p.createdAt || '');
+                  if (q) {
+                    const hay = [p.fullName, p.mrNumber, p.nik, p.bpjsNumber || '', p.phone, p.address, ...p.allergies, ...p.chronicConditions].join(' ').toLowerCase();
+                    if (!hay.includes(q)) return false;
+                  }
+                  if (genderFilter !== 'ALL' && p.gender !== genderFilter) return false;
+                  if (clinicalFlagFilter === 'WITH_ALLERGY' && p.allergies.length === 0) return false;
+                  if (clinicalFlagFilter === 'WITH_CHRONIC' && p.chronicConditions.length === 0) return false;
+                  if (guarantorFilter !== 'ALL') {
+                    if (guarantorFilter === 'BPJS_TERDAFTAR') {
+                      if (!p.bpjsNumber) return false;
+                    } else if (!stat?.guarantors.has(guarantorFilter)) {
+                      return false;
+                    }
+                  }
+                  if (polyFilter !== 'ALL' && !stat?.polyclinics.has(polyFilter)) return false;
+                  if (regFilter === 'HARI_INI' && regDate !== todayDate) return false;
+                  if (regFilter === '7_HARI' && (!regDate || !isDateWithinDays(regDate, 7))) return false;
+                  if (regFilter === 'BULAN_INI' && (!regDate || !isSameMonth(regDate))) return false;
+                  if (regFilter === 'RENTANG') {
+                    if (regStartDate && regDate < regStartDate) return false;
+                    if (regEndDate && regDate > regEndDate) return false;
+                  }
+                  const visitDates = stat?.visitDates || [];
+                  if (visitFilter === 'DATANG_HARI_INI' && !visitDates.some((d) => d === todayDate)) return false;
+                  if (visitFilter === 'DATANG_7_HARI' && !visitDates.some((d) => isDateWithinDays(d, 7))) return false;
+                  if (visitFilter === 'DATANG_BULAN_INI' && !visitDates.some((d) => isSameMonth(d))) return false;
+                  if (visitFilter === 'RENTANG_KUNJUNGAN') {
+                    const cameInRange = visitDates.some((d) => (!visitStartDate || d >= visitStartDate) && (!visitEndDate || d <= visitEndDate));
+                    if (!cameInRange) return false;
+                  }
+                  if (visitFilter === 'BELUM_PERNAH' && visitDates.length > 0) return false;
+                  return true;
+                });
               }}
               compact
               contextLabel="Ekspor Tabel Pasien"
