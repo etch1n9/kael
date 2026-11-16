@@ -126,7 +126,7 @@ fn create(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         ));
     }
     let batches = if stock > 0.0 {
-        vec![json!({"batchNumber":batch,"expiryDate":expiry,"stock":stock})]
+        vec![json!({"batchNumber":batch,"expiryDate":expiry,"stock":stock,"unitCost":buy})]
     } else {
         vec![]
     };
@@ -184,23 +184,81 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
     let before = batch_index
         .map(|i| n(&array(&med, "batches")[i], "stock"))
         .unwrap_or(0.0);
+    let supplier = text(body, "supplierName").trim();
+    let old_buy_price = n(&med, "buyPrice");
+    let incoming_cost = body
+        .get("buyPrice")
+        .filter(|value| value.is_number())
+        .and_then(Value::as_f64)
+        .filter(|price| price.is_finite() && *price >= 0.0)
+        .unwrap_or(old_buy_price);
+    let explicit_ref = text(body, "referenceId").trim();
+    let idem_key = text(body, "idempotencyKey").trim();
+    let now_dt = chrono::Utc::now();
+    let duplicate_mutation = array(&app.db, "medicationMutations")
+        .iter()
+        .rev()
+        .find(|m| {
+            text(m, "facilityCode") == ctx.facility_code
+                && text(m, "medicationId") == medication_id
+                && text(m, "type") == "MASUK_PBF"
+        })
+        .is_some_and(|m| {
+            if !explicit_ref.is_empty() && text(m, "referenceId") == explicit_ref {
+                return true;
+            }
+            if !idem_key.is_empty() && text(m, "referenceId") == idem_key {
+                return true;
+            }
+            let same_payload = text(m, "batchNumber").eq_ignore_ascii_case(&batch)
+                && (n(m, "quantityChange") - qty).abs() < 1e-6
+                && (n(m, "unitPrice") - incoming_cost).abs() < 1e-6
+                && text(m, "counterpartyOrPatient") == supplier;
+            let recent = chrono::DateTime::parse_from_rfc3339(text(m, "timestamp"))
+                .map(|ts| (now_dt - ts.with_timezone(&chrono::Utc)).num_seconds().abs() <= 15)
+                .unwrap_or(false);
+            same_payload && recent
+        });
+    if duplicate_mutation {
+        return json_response(200, med);
+    }
+    for existing_batch in array_mut(&mut med, "batches") {
+        if existing_batch.get("unitCost").and_then(Value::as_f64).is_none() {
+            existing_batch["unitCost"] = json!(old_buy_price);
+        }
+    }
     if let Some(i) = batch_index {
         let existing_expiry = text(&array(&med, "batches")[i], "expiryDate").to_owned();
         if !existing_expiry.is_empty() && existing_expiry != expiry {
             return Err(conflict("Tanggal kedaluwarsa batch ini berbeda dengan data yang sudah tercatat."));
         }
+        let prev_cost = array(&med, "batches")[i]
+            .get("unitCost")
+            .and_then(Value::as_f64)
+            .filter(|c| c.is_finite() && *c >= 0.0)
+            .unwrap_or(old_buy_price);
+        let blended_cost = if before > 0.0 {
+            ((before * prev_cost) + (qty * incoming_cost)) / (before + qty)
+        } else {
+            incoming_cost
+        };
         array_mut(&mut med, "batches")[i]["stock"] = json!(before + qty);
+        array_mut(&mut med, "batches")[i]["unitCost"] = json!(blended_cost);
         if existing_expiry.is_empty() {
             array_mut(&mut med, "batches")[i]["expiryDate"] = json!(expiry);
         }
     } else {
         array_mut(&mut med, "batches")
-            .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":qty}));
+            .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":qty,"unitCost":incoming_cost}));
     }
-    let supplier = text(body, "supplierName").trim();
-    if let Some(price) = body.get("buyPrice").filter(|value| value.is_number()).and_then(Value::as_f64).filter(|price| price.is_finite() && *price >= 0.0) {
-        med["buyPrice"] = json!(price);
-    }
+    med["buyPrice"] = json!(incoming_cost);
+    let receipt_ref = if !explicit_ref.is_empty() {
+        explicit_ref.to_owned()
+    } else if !idem_key.is_empty() {
+        idem_key.to_owned()
+    } else {
+        id("RST")
+    };
     let notes = format!("Penerimaan stok masuk Batch {batch} (ED {expiry}) dari {supplier}");
     stock_mutation(
         app,
@@ -209,14 +267,14 @@ fn restock(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Valu
         &batch,
         before,
         before + qty,
-        n(&med, "buyPrice"),
+        incoming_cost,
         "MASUK_PBF",
-        &format!("PBF-{batch}"),
+        &receipt_ref,
         supplier,
         &notes,
     );
-    let cost = (qty * n(&med, "buyPrice")).round();
-    inventory_receipt(app, ctx, cost, &notes, &format!("PBF-{batch}"));
+    let cost = (qty * incoming_cost).round();
+    inventory_receipt(app, ctx, cost, &notes, &receipt_ref);
     array_mut(&mut app.db, "medications")[index] = med.clone();
     audit(
         app,
@@ -293,7 +351,7 @@ fn direct(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Value
     let quantity = n(body, "quantity");
     let price = n(&med, "sellPrice");
     let reference = id("DSP");
-    allocate(
+    let allocations = allocate(
         app,
         ctx,
         &mut med,
@@ -312,7 +370,19 @@ fn direct(app: &mut App, ctx: &RequestContext, medication_id: &str, body: &Value
         text(&med, "name"),
         text(&med, "unit")
     );
-    post_cogs(app, ctx, (quantity * n(&med, "buyPrice")).round(), &description, &reference);
+    let cogs_amount: f64 = allocations
+        .iter()
+        .map(|a| {
+            let unit_cost = a
+                .get("unitCost")
+                .and_then(Value::as_f64)
+                .filter(|c| c.is_finite() && *c >= 0.0)
+                .unwrap_or_else(|| n(&med, "buyPrice"));
+            n(a, "quantity") * unit_cost
+        })
+        .sum::<f64>()
+        .round();
+    post_cogs(app, ctx, cogs_amount, &description, &reference);
     let visit_id = text(body, "visitId");
     if !visit_id.is_empty() {
         if let Some(visit) = array(&app.db, "visits").iter().find(|visit| text(visit, "id") == visit_id && text(visit, "facilityCode") == ctx.facility_code).cloned() {
@@ -408,9 +478,14 @@ fn dispense(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -
             &counterparty,
             &notes,
         )? {
-            dispensed.push(json!({"medicationCode":med["code"],"batchNumber":allocation["batchNumber"],"quantity":allocation["quantity"]}));
+            let unit_cost = allocation
+                .get("unitCost")
+                .and_then(Value::as_f64)
+                .filter(|c| c.is_finite() && *c >= 0.0)
+                .unwrap_or_else(|| n(&med, "buyPrice"));
+            total_cogs += (n(&allocation, "quantity") * unit_cost).round();
+            dispensed.push(json!({"medicationCode":med["code"],"batchNumber":allocation["batchNumber"],"quantity":allocation["quantity"],"unitCost":unit_cost}));
         }
-        total_cogs += (n(item, "quantity") * n(&med, "buyPrice")).round();
         array_mut(&mut app.db, "medications")[med_index] = med;
     }
     post_cogs(
@@ -429,34 +504,20 @@ fn dispense(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value) -
         "pharmacistNotes",
         "Telaah resep 7 benar terpenuhi, edukasi aturan pakai telah disampaikan."
     ));
-    let pending_lab = array(&app.db, "labOrders").iter().any(|lab| {
-        text(lab, "visitId") == text(&order, "visitId")
-            && text(lab, "facilityCode") == ctx.facility_code
-            && !matches!(text(lab, "status"), "SELESAI_VERIFIKASI" | "BATAL")
-    });
-    let pending_rad = array(&app.db, "radiologyOrders").iter().any(|row| {
-        text(row, "visitId") == text(&order, "visitId")
-            && text(row, "facilityCode") == ctx.facility_code
-            && !matches!(text(row, "status"), "EXPERTISE_VERIFIED" | "BATAL")
-    });
-    if !pending_lab && !pending_rad {
-        let visit_id = text(&order, "visitId");
-        let invoice_settled = array(&app.db, "invoices").iter().any(|inv| {
-            text(inv, "visitId") == visit_id
-                && text(inv, "facilityCode") == ctx.facility_code
-                && matches!(text(inv, "status"), "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI")
-        });
-        let next_visit_status = if invoice_settled { "SELESAI" } else { "KASIR" };
-        for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
-            text(v, "id") == visit_id
-                && text(v, "facilityCode") == ctx.facility_code
-                && text(v, "status") == "FARMASI_LAB"
-        }) {
-            visit["status"] = json!(next_visit_status);
-            visit["updatedAt"] = json!(now());
+    array_mut(&mut app.db, "pharmacyOrders")[index] = order.clone();
+    let visit_id = text(&order, "visitId").to_owned();
+    if let Some(next_visit_status) = crate::finance::compute_visit_post_service_status(app, &ctx.facility_code, &visit_id) {
+        if next_visit_status != "FARMASI_LAB" {
+            for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
+                text(v, "id") == visit_id
+                    && text(v, "facilityCode") == ctx.facility_code
+                    && text(v, "status") == "FARMASI_LAB"
+            }) {
+                visit["status"] = json!(next_visit_status);
+                visit["updatedAt"] = json!(now());
+            }
         }
     }
-    array_mut(&mut app.db, "pharmacyOrders")[index] = order.clone();
     audit(
         app,
         ctx,

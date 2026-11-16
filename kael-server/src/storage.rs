@@ -9,9 +9,11 @@ use std::{
     time::Duration,
 };
 
+type FingerprintMap = HashMap<String, HashMap<String, u64>>;
+
 pub struct Storage {
     connection: Connection,
-    fingerprints: HashMap<String, u64>,
+    fingerprints: FingerprintMap,
     path: std::path::PathBuf,
     lock_file: Option<std::fs::File>,
     lock_path: std::path::PathBuf,
@@ -78,7 +80,7 @@ impl Storage {
             }
         };
         if version == 1 {
-            if let Err(error) = migrate_v1(&mut connection) {
+            if let Err(error) = migrate_v1(&mut connection, path) {
                 drop(lock_file);
                 let _ = fs::remove_file(&lock_path);
                 return Err(error);
@@ -117,15 +119,19 @@ impl Storage {
 
     #[allow(dead_code)]
     pub fn save(&mut self, db: &Value) -> Result<(), String> {
+        self.save_dirty(db, None)
+    }
+
+    pub fn save_dirty(&mut self, db: &Value, dirty: Option<&HashSet<String>>) -> Result<(), String> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("Database sedang tidak dapat ditulis: {error}"))?;
-        let fingerprints = write_database(&transaction, db, &self.fingerprints)?;
+        let updates = write_database_delta(&transaction, db, &self.fingerprints, dirty)?;
         transaction
             .commit()
             .map_err(|error| format!("Commit database gagal: {error}"))?;
-        self.fingerprints = fingerprints;
+        apply_fingerprint_updates(&mut self.fingerprints, updates);
         Ok(())
     }
 
@@ -178,16 +184,26 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
     }
 
+    #[allow(dead_code)]
     pub fn save_all(
         &mut self,
         db: &Value,
         sessions: &HashMap<String, (String, String, i64)>,
     ) -> Result<(), String> {
+        self.save_all_dirty(db, sessions, None)
+    }
+
+    pub fn save_all_dirty(
+        &mut self,
+        db: &Value,
+        sessions: &HashMap<String, (String, String, i64)>,
+        dirty: Option<&HashSet<String>>,
+    ) -> Result<(), String> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("Database sedang tidak dapat ditulis: {error}"))?;
-        let fingerprints = write_database(&transaction, db, &self.fingerprints)?;
+        let updates = write_database_delta(&transaction, db, &self.fingerprints, dirty)?;
         transaction
             .execute("DELETE FROM sessions", [])
             .map_err(|error| error.to_string())?;
@@ -204,7 +220,7 @@ impl Storage {
         transaction
             .commit()
             .map_err(|error| format!("Commit database gagal: {error}"))?;
-        self.fingerprints = fingerprints;
+        apply_fingerprint_updates(&mut self.fingerprints, updates);
         Ok(())
     }
 
@@ -240,53 +256,131 @@ impl Storage {
     }
 
     pub fn backup_to(&self, dest: &Path) -> Result<(), String> {
-        if dest.exists() {
-            let _ = fs::remove_file(dest);
+        if let (Ok(src_canon), Ok(dst_canon)) = (self.path.canonicalize(), dest.canonicalize()) {
+            if src_canon == dst_canon {
+                return Err("Path tujuan backup tidak boleh sama dengan berkas database aktif.".into());
+            }
         }
-        let escaped = dest.to_string_lossy().replace('\'', "''");
-        self.connection
-            .execute(&format!("VACUUM INTO '{escaped}'"), [])
-            .map_err(|error| error.to_string())?;
-        let dst_conn = Connection::open_with_flags(dest, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|error| error.to_string())?;
-        dst_conn
-            .pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))
+        let parent = dest.parent().ok_or_else(|| "Lokasi tujuan backup tidak valid.".to_string())?;
+        let mut directory = fs::DirBuilder::new();
+        directory.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directory.mode(0o700);
+        }
+        directory.create(parent).map_err(|error| error.to_string())?;
+        let staging = parent.join(format!(".kael-backup-{}.tmp", uuid::Uuid::new_v4()));
+        let escaped = staging.to_string_lossy().replace('\'', "''");
+        if let Err(error) = self.connection.execute(&format!("VACUUM INTO '{escaped}'"), []) {
+            let _ = fs::remove_file(&staging);
+            return Err(error.to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&staging, fs::Permissions::from_mode(0o600));
+        }
+        let check = Connection::open_with_flags(&staging, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| error.to_string())
-            .and_then(|res| {
-                if res == "ok" {
-                    Ok(())
-                } else {
-                    Err(format!("Integritas salinan database tidak valid: {res}"))
+            .and_then(|dst_conn| {
+                dst_conn
+                    .pragma_query_value(None, "integrity_check", |row| row.get::<_, String>(0))
+                    .map_err(|error| error.to_string())
+            });
+        match check {
+            Ok(res) if res == "ok" => {
+                if let Err(error) = fs::rename(&staging, dest) {
+                    let _ = fs::remove_file(&staging);
+                    return Err(format!("Gagal mempublikasikan berkas cadangan: {error}"));
                 }
-            })
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(dest, fs::Permissions::from_mode(0o600));
+                }
+                Ok(())
+            }
+            Ok(res) => {
+                let _ = fs::remove_file(&staging);
+                Err(format!("Integritas salinan database tidak valid: {res}"))
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&staging);
+                Err(error)
+            }
+        }
     }
 
     pub fn verify_and_restore(source: &Path, target: &Path) -> Result<(), String> {
         if !source.is_file() {
             return Err("Berkas sumber pemulihan tidak ditemukan.".into());
         }
-        let src_conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|error| format!("Berkas sumber tidak dapat dibuka: {error}"))?;
-        let integrity: String = src_conn
-            .pragma_query_value(None, "integrity_check", |row| row.get(0))
-            .map_err(|error| error.to_string())?;
-        if integrity != "ok" {
-            return Err(format!("Pemeriksaan integritas berkas cadangan gagal: {integrity}"));
+        if let (Ok(src_canon), Ok(tgt_canon)) = (source.canonicalize(), target.canonicalize()) {
+            if src_canon == tgt_canon {
+                return Err("Berkas sumber pemulihan tidak boleh sama dengan target aktif.".into());
+            }
         }
-        drop(src_conn);
-        let (_, _) = Self::load(source)?;
-        let parent = target.parent().ok_or_else(|| "Lokasi target tidak valid.".to_string())?;
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let temp = parent.join(format!(".kael-restore-{}.tmp", uuid::Uuid::new_v4()));
-        {
-            let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let (target_lock_file, target_lock_path) = claim_lock(target)?;
+        let result = (|| -> Result<(), String> {
+            let src_conn = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| format!("Berkas sumber tidak dapat dibuka: {error}"))?;
+            let integrity: String = src_conn
+                .pragma_query_value(None, "integrity_check", |row| row.get(0))
                 .map_err(|error| error.to_string())?;
-            let escaped = temp.to_string_lossy().replace('\'', "''");
-            src.execute(&format!("VACUUM INTO '{escaped}'"), [])
-                .map_err(|error| error.to_string())?;
-        }
-        fs::rename(&temp, target).map_err(|error| format!("Gagal memasang database hasil pemulihan: {error}"))?;
-        Ok(())
+            if integrity != "ok" {
+                return Err(format!("Pemeriksaan integritas berkas cadangan gagal: {integrity}"));
+            }
+            drop(src_conn);
+            let parent = target.parent().ok_or_else(|| "Lokasi target tidak valid.".to_string())?;
+            let mut directory = fs::DirBuilder::new();
+            directory.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directory.mode(0o700);
+            }
+            directory.create(parent).map_err(|error| error.to_string())?;
+            let temp = parent.join(format!(".kael-restore-{}.tmp", uuid::Uuid::new_v4()));
+            {
+                let src = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|error| error.to_string())?;
+                let escaped = temp.to_string_lossy().replace('\'', "''");
+                src.execute(&format!("VACUUM INTO '{escaped}'"), [])
+                    .map_err(|error| error.to_string())?;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&temp, fs::Permissions::from_mode(0o600));
+            }
+            if let Err(error) = Self::load(&temp) {
+                let _ = fs::remove_file(&temp);
+                let _ = fs::remove_file(format!("{}-wal", temp.display()));
+                let _ = fs::remove_file(format!("{}-shm", temp.display()));
+                let _ = fs::remove_file(format!("{}-journal", temp.display()));
+                return Err(error);
+            }
+            let _ = fs::remove_file(format!("{}-wal", temp.display()));
+            let _ = fs::remove_file(format!("{}-shm", temp.display()));
+            let _ = fs::remove_file(format!("{}-journal", temp.display()));
+            let _ = fs::remove_file(format!("{}-wal", target.display()));
+            let _ = fs::remove_file(format!("{}-shm", target.display()));
+            let _ = fs::remove_file(format!("{}-journal", target.display()));
+            if let Err(error) = fs::rename(&temp, target) {
+                let _ = fs::remove_file(&temp);
+                return Err(format!("Gagal memasang database hasil pemulihan: {error}"));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(target, fs::Permissions::from_mode(0o600));
+            }
+            Ok(())
+        })();
+        drop(target_lock_file);
+        let _ = fs::remove_file(&target_lock_path);
+        result
     }
 
     pub fn delete_session(&mut self, token: &str) -> Result<(), String> {
@@ -378,33 +472,54 @@ fn claim_lock(path: &Path) -> Result<(std::fs::File, std::path::PathBuf), String
     Err("Kunci proses database KAEL tidak dapat diambil.".into())
 }
 
-fn migrate_v1(connection: &mut Connection) -> Result<(), String> {
+fn migrate_v1(connection: &mut Connection, path: &Path) -> Result<(), String> {
     let payload: String = connection
         .query_row("SELECT payload FROM kael_state WHERE id = 1", [], |row| row.get(0))
         .map_err(|error| format!("Database skema lama tidak dapat dibaca: {error}"))?;
     let mut db: Value = serde_json::from_str(&payload).map_err(|_| "Snapshot database lama tidak valid.".to_string())?;
+    normalize(&mut db, path)?;
     if let Some(obj) = db.as_object_mut() {
         for (col_key, col_val) in obj.iter_mut() {
             if col_key == "sessions" {
                 continue;
             }
             if let Some(rows) = col_val.as_array_mut() {
+                let pre_existing: HashSet<String> = rows
+                    .iter()
+                    .map(record_id)
+                    .filter(|id| !id.is_empty())
+                    .collect();
                 let mut seen = HashSet::new();
                 for (idx, row) in rows.iter_mut().enumerate() {
+                    if !row.is_object() {
+                        return Err(format!(" Baris pada koleksi {col_key} tidak valid untuk dimigrasikan."));
+                    }
                     let orig_id = record_id(row);
                     let assigned = if orig_id.is_empty() {
-                        format!("mig-{col_key}-{}", idx + 1)
+                        let mut seq = idx + 1;
+                        loop {
+                            let cand = format!("mig-{col_key}-{seq}");
+                            if !pre_existing.contains(&cand) && seen.insert(cand.clone()) {
+                                break cand;
+                            }
+                            seq += 1;
+                        }
                     } else if !seen.insert(orig_id.clone()) {
                         if col_key == "soapRevisions" && row.get("soapId").is_none() {
                             row["soapId"] = json!(orig_id);
                         }
-                        let disambiguated = format!("{orig_id}-rev-{}", idx + 1);
-                        seen.insert(disambiguated.clone());
-                        disambiguated
+                        let mut seq = idx + 1;
+                        loop {
+                            let cand = format!("{orig_id}-rev-{seq}");
+                            if !pre_existing.contains(&cand) && seen.insert(cand.clone()) {
+                                break cand;
+                            }
+                            seq += 1;
+                        }
                     } else {
                         orig_id
                     };
-                    if row.is_object() && record_id(row) != assigned {
+                    if record_id(row) != assigned {
                         row["id"] = json!(assigned);
                     }
                 }
@@ -452,9 +567,9 @@ fn configure(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn read_database(connection: &Connection, path: &Path) -> Result<(Value, HashMap<String, u64>), String> {
+fn read_database(connection: &Connection, path: &Path) -> Result<(Value, FingerprintMap), String> {
     let mut db = json!({});
-    let mut fingerprints = HashMap::new();
+    let mut fingerprints: FingerprintMap = HashMap::new();
     let mut statement = connection
         .prepare("SELECT collection, id, payload FROM records ORDER BY rowid ASC")
         .map_err(|error| error.to_string())?;
@@ -468,7 +583,10 @@ fn read_database(connection: &Connection, path: &Path) -> Result<(Value, HashMap
             db[&collection] = json!([]);
         }
         db[&collection].as_array_mut().expect("koleksi").push(value);
-        fingerprints.insert(fingerprint_key(&collection, &id), hash_payload(&payload));
+        fingerprints
+            .entry(collection)
+            .or_default()
+            .insert(id, hash_payload(&payload));
     }
     drop(statement);
     let mut documents = connection
@@ -480,66 +598,139 @@ fn read_database(connection: &Connection, path: &Path) -> Result<(Value, HashMap
     for row in docs {
         let (key, payload) = row.map_err(|error| error.to_string())?;
         db[&key] = serde_json::from_str(&payload).map_err(|_| format!("Dokumen {key} tidak valid."))?;
-        fingerprints.insert(fingerprint_key("@", &key), hash_payload(&payload));
+        fingerprints
+            .entry("@".to_owned())
+            .or_default()
+            .insert(key, hash_payload(&payload));
     }
     normalize(&mut db, path)?;
     Ok((db, fingerprints))
 }
 
+enum CollectionUpdate {
+    Replace(HashMap<String, u64>),
+    Append(Vec<(String, u64)>),
+}
+
+fn apply_fingerprint_updates(
+    fingerprints: &mut FingerprintMap,
+    updates: HashMap<String, CollectionUpdate>,
+) {
+    for (col, update) in updates {
+        match update {
+            CollectionUpdate::Replace(map) => {
+                fingerprints.insert(col, map);
+            }
+            CollectionUpdate::Append(entries) => {
+                let target = fingerprints.entry(col).or_default();
+                for (id, digest) in entries {
+                    target.insert(id, digest);
+                }
+            }
+        }
+    }
+}
+
 fn write_database(
     transaction: &Transaction,
     db: &Value,
-    previous: &HashMap<String, u64>,
-) -> Result<HashMap<String, u64>, String> {
-    let mut next = HashMap::new();
+    previous: &FingerprintMap,
+) -> Result<FingerprintMap, String> {
+    let updates = write_database_delta(transaction, db, previous, None)?;
+    let mut next = previous.clone();
+    apply_fingerprint_updates(&mut next, updates);
+    Ok(next)
+}
+
+fn write_database_delta(
+    transaction: &Transaction,
+    db: &Value,
+    previous: &FingerprintMap,
+    dirty_collections: Option<&HashSet<String>>,
+) -> Result<HashMap<String, CollectionUpdate>, String> {
+    let mut updates = HashMap::new();
+    let mut doc_map = previous.get("@").cloned().unwrap_or_default();
     let object = db.as_object().ok_or_else(|| "Database KAEL tidak valid.".to_string())?;
     for (key, value) in object {
         if key == "sessions" {
             continue;
         }
         if let Some(rows) = value.as_array() {
-            let mut seen = HashSet::new();
+            if rows.len() > 500
+                && !matches!(key.as_str(), "roles" | "users" | "facilities" | "radiologyOrders")
+                && dirty_collections.is_some_and(|dirty| !dirty.contains(key))
+            {
+                continue;
+            }
+            let prev_col = previous.get(key);
+            if key == "auditLogs" {
+                if let Some(prev_map) = prev_col {
+                    let prev_len = prev_map.len();
+                    if prev_len > 0
+                        && rows.len() >= prev_len
+                        && prev_map.contains_key(&record_id(&rows[prev_len - 1]))
+                    {
+                        let mut appended = Vec::new();
+                        for row in &rows[prev_len..] {
+                            let id = record_id(row);
+                            if id.is_empty() || prev_map.contains_key(&id) {
+                                continue;
+                            }
+                            let payload = serde_json::to_string(row).map_err(|error| error.to_string())?;
+                            let digest = hash_payload(&payload);
+                            transaction.execute(
+                                "INSERT INTO records (collection, id, facility_code, created_at, payload) VALUES (?1, ?2, ?3, ?4, ?5)
+                                 ON CONFLICT(collection, id) DO UPDATE SET facility_code = excluded.facility_code, created_at = excluded.created_at, payload = excluded.payload",
+                                params![key, id, text_of(row, "facilityCode"), created_of(row), payload],
+                            ).map_err(|error| error.to_string())?;
+                            appended.push((id, digest));
+                        }
+                        updates.insert(key.clone(), CollectionUpdate::Append(appended));
+                        continue;
+                    }
+                }
+            }
+            let mut next_col = HashMap::with_capacity(rows.len());
             for row in rows {
                 let id = record_id(row);
-                if id.is_empty() || !seen.insert(id.clone()) {
+                if id.is_empty() || next_col.contains_key(&id) {
                     continue;
                 }
                 let payload = serde_json::to_string(row).map_err(|error| error.to_string())?;
                 let digest = hash_payload(&payload);
-                let mark = fingerprint_key(key, &id);
-                if previous.get(&mark) != Some(&digest) {
+                if prev_col.and_then(|m| m.get(&id)) != Some(&digest) {
                     transaction.execute(
                         "INSERT INTO records (collection, id, facility_code, created_at, payload) VALUES (?1, ?2, ?3, ?4, ?5)
                          ON CONFLICT(collection, id) DO UPDATE SET facility_code = excluded.facility_code, created_at = excluded.created_at, payload = excluded.payload",
                         params![key, id, text_of(row, "facilityCode"), created_of(row), payload],
                     ).map_err(|error| error.to_string())?;
                 }
-                next.insert(mark, digest);
+                next_col.insert(id, digest);
             }
-            let prefix = format!("{key}\u{1}");
-            for existing in previous.keys() {
-                if let Some(id) = existing.strip_prefix(&prefix) {
-                    if !seen.contains(id) {
+            if let Some(prev_map) = prev_col {
+                for existing_id in prev_map.keys() {
+                    if !next_col.contains_key(existing_id) {
                         transaction
-                            .execute("DELETE FROM records WHERE collection = ?1 AND id = ?2", params![key, id])
+                            .execute("DELETE FROM records WHERE collection = ?1 AND id = ?2", params![key, existing_id])
                             .map_err(|error| error.to_string())?;
                     }
                 }
             }
+            updates.insert(key.clone(), CollectionUpdate::Replace(next_col));
         } else if !value.is_null() {
             let payload = serde_json::to_string(value).map_err(|error| error.to_string())?;
             let digest = hash_payload(&payload);
-            let mark = fingerprint_key("@", key);
-            if previous.get(&mark) != Some(&digest) {
+            if doc_map.get(key) != Some(&digest) {
                 transaction.execute(
                     "INSERT INTO documents (key, payload) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET payload = excluded.payload",
                     params![key, payload],
                 ).map_err(|error| error.to_string())?;
             }
-            next.insert(mark, digest);
+            doc_map.insert(key.clone(), digest);
         }
     }
-    Ok(next)
+    updates.insert("@".to_owned(), CollectionUpdate::Replace(doc_map));
+    Ok(updates)
 }
 
 fn record_id(row: &Value) -> String {
@@ -564,10 +755,6 @@ fn created_of(value: &Value) -> String {
         }
     }
     String::new()
-}
-
-fn fingerprint_key(collection: &str, id: &str) -> String {
-    format!("{collection}\u{1}{id}")
 }
 
 fn hash_payload(payload: &str) -> u64 {

@@ -4,9 +4,9 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{SecondsFormat, Utc};
 use serde_json::{Value, json};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -118,9 +118,15 @@ static EMPTY_ROWS: LazyLock<Vec<Value>> = LazyLock::new(Vec::new);
 static LOGIN_PERMITS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| tokio::sync::Semaphore::new(2));
 thread_local! {
     static DB_DIRTY: Cell<bool> = const { Cell::new(false) };
+    static DIRTY_COLLECTIONS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 fn take_dirty() -> bool {
+    DIRTY_COLLECTIONS.with(|set| set.borrow_mut().clear());
     DB_DIRTY.with(|flag| flag.replace(false))
+}
+fn take_dirty_collections() -> HashSet<String> {
+    DB_DIRTY.with(|flag| flag.set(false));
+    DIRTY_COLLECTIONS.with(|set| std::mem::take(&mut *set.borrow_mut()))
 }
 static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
     hash_password("kael-login-dummy").unwrap_or_default()
@@ -133,6 +139,9 @@ pub fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
 }
 pub fn array_mut<'a>(value: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
     DB_DIRTY.with(|flag| flag.set(true));
+    DIRTY_COLLECTIONS.with(|set| {
+        set.borrow_mut().insert(key.to_owned());
+    });
     if !value.is_object() {
         *value = json!({});
     }
@@ -302,6 +311,7 @@ fn prune_runtime_collections(app: &mut App) {
 pub fn save(app: &mut App) -> Result<(), ApiError> {
     cap_sessions(app);
     prune_runtime_collections(app);
+    let dirty_collections = take_dirty_collections();
     let digest = sessions_digest(&app.sessions);
     let packed: HashMap<String, (String, String, i64)> = app
         .sessions
@@ -318,9 +328,9 @@ pub fn save(app: &mut App) -> Result<(), ApiError> {
         })
         .collect();
     let saved = if digest == app.sessions_digest {
-        app.store.save(&app.db)
+        app.store.save_dirty(&app.db, Some(&dirty_collections))
     } else {
-        app.store.save_all(&app.db, &packed)
+        app.store.save_all_dirty(&app.db, &packed, Some(&dirty_collections))
     };
     if let Err(message) = saved {
         let loaded = app.store.reload();
@@ -674,31 +684,57 @@ fn in_window(entry: &Value, from: &str, to: &str) -> bool {
         && (to.is_empty() || stamp <= to || stamp.starts_with(to))
 }
 
-fn stamp_of(entry: &Value) -> String {
-    ["createdAt", "timestamp", "recordedAt", "publishedAt", "orderDate", "updatedAt"]
-        .iter()
-        .map(|key| text(entry, key).to_owned())
-        .find(|value| !value.is_empty())
-        .unwrap_or_default()
+fn stamp_str(entry: &Value) -> &str {
+    for key in ["createdAt", "timestamp", "recordedAt", "publishedAt", "orderDate", "updatedAt"] {
+        let val = text(entry, key);
+        if !val.is_empty() {
+            return val;
+        }
+    }
+    ""
 }
 
-fn present(mut rows: Vec<Value>, limit: usize) -> Vec<Value> {
+fn stamp_of(entry: &Value) -> String {
+    stamp_str(entry).to_owned()
+}
+
+fn present_refs(mut rows: Vec<&Value>, limit: usize) -> Vec<Value> {
     let terminal = |row: &Value| {
         matches!(
             text(row, "status"),
             "SELESAI" | "BATAL" | "LUNAS" | "KLAIM_DISETUJUI"
         )
     };
-    rows.sort_by(|left, right| {
+    let cmp = |left: &&Value, right: &&Value| {
         terminal(left)
             .cmp(&terminal(right))
-            .then_with(|| stamp_of(right).cmp(&stamp_of(left)))
+            .then_with(|| stamp_str(right).cmp(stamp_str(left)))
             .then_with(|| text(right, "id").cmp(text(left, "id")))
-    });
+    };
     if rows.len() > limit {
+        rows.select_nth_unstable_by(limit, cmp);
         rows.truncate(limit);
     }
-    rows
+    rows.sort_by(cmp);
+    rows.into_iter().cloned().collect()
+}
+
+fn contains_ignore_ascii_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle_lower.len() {
+        return false;
+    }
+    if haystack.is_ascii() && needle_lower.is_ascii() {
+        let needle_bytes = needle_lower.as_bytes();
+        haystack
+            .as_bytes()
+            .windows(needle_bytes.len())
+            .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+    } else {
+        haystack.to_lowercase().contains(needle_lower)
+    }
 }
 
 fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
@@ -809,19 +845,38 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
         if code.is_empty() || !collection_access(key) {
             return vec![];
         }
-        present(array(&app.db, key).iter().filter(|entry| {
-            if text(entry, "facilityCode") != code.as_str() || !in_window(entry, from, to) {
-                return false;
-            }
-            if !patient_filter.is_empty()
-                && text(entry, "id") != patient_filter
-                && text(entry, "patientId") != patient_filter
-                && text(entry, "visitId") != patient_filter
-            {
-                return false;
-            }
-            true
-        }).cloned().collect(), limit)
+        let cap = if matches!(
+            key,
+            "accountingEntries"
+                | "invoices"
+                | "doubleEntryJournals"
+                | "purchaseOrders"
+                | "medications"
+                | "medicationMutations"
+        ) {
+            usize::MAX
+        } else {
+            limit
+        };
+        present_refs(
+            array(&app.db, key)
+                .iter()
+                .filter(|entry| {
+                    if text(entry, "facilityCode") != code.as_str() || !in_window(entry, from, to) {
+                        return false;
+                    }
+                    if !patient_filter.is_empty()
+                        && text(entry, "id") != patient_filter
+                        && text(entry, "patientId") != patient_filter
+                        && text(entry, "visitId") != patient_filter
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .collect(),
+            cap,
+        )
     };
     let visible_users: Vec<Value> = array(&app.db, "users")
         .iter()
@@ -851,10 +906,10 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
         "beds":scoped("beds"),"medications":scoped("medications"),"medicationMutations":scoped("medicationMutations"),
         "pharmacyOrders":scoped("pharmacyOrders"),"purchaseOrders":scoped("purchaseOrders"),"labOrders":scoped("labOrders"),
         "radiologyOrders":scoped("radiologyOrders"),"surgicalSchedules":scoped("surgicalSchedules"),
-        "referrals":present(array(&app.db,"referrals").iter().filter(|entry| referrals_access && !code.is_empty() && (text(entry,"originFacilityCode") == code || text(entry,"destinationFacilityCode") == code) && in_window(entry, from, to)).cloned().collect(), limit),
+        "referrals":present_refs(array(&app.db,"referrals").iter().filter(|entry| referrals_access && !code.is_empty() && (text(entry,"originFacilityCode") == code || text(entry,"destinationFacilityCode") == code) && in_window(entry, from, to)).collect(), limit),
         "invoices":if finance {scoped("invoices")} else {vec![]},"accountingEntries":if finance {scoped("accountingEntries")} else {vec![]},
         "doubleEntryJournals":if finance {scoped("doubleEntryJournals")} else {vec![]},"bridgingLogs":scoped("bridgingLogs"),
-        "auditLogs":if superuser {present(array(&app.db,"auditLogs").iter().filter(|entry| in_window(entry, from, to)).cloned().collect(), limit)} else {vec![]},"allUsers":visible_users,
+        "auditLogs":if superuser {present_refs(array(&app.db,"auditLogs").iter().filter(|entry| in_window(entry, from, to)).collect(), limit)} else {vec![]},"allUsers":visible_users,
         "deletedUsers":if superuser {array(&app.db,"users").iter().filter(|entry| !text(entry,"deletedAt").is_empty()).map(|entry| sanitize_user(&app.db,entry,code)).collect::<Vec<_>>()} else {vec![]},
         "allFacilities":if superuser {array(&app.db,"facilities").clone()} else {accessible.clone()},"serverConfig":config});
     let mut data_access = serde_json::Map::new();
@@ -898,15 +953,15 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
             .filter(|code| allows(app, user, code, "KEUANGAN_OWNER"))
             .collect();
         for key in ["accountingEntries", "invoices", "visits", "medications", "medicationMutations", "purchaseOrders", "doubleEntryJournals"] {
-            result["multiFacilityFinance"][key] = json!(present(
+            let cap = if key == "visits" { limit } else { usize::MAX };
+            result["multiFacilityFinance"][key] = json!(present_refs(
                 array(&app.db, key)
                     .iter()
                     .filter(|entry| codes.contains(&text(entry, "facilityCode"))
                         && (key != "visits" || can_read_visits_at(text(entry, "facilityCode")))
                         && in_window(entry, from, to))
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                limit
+                    .collect(),
+                cap
             ));
         }
     }
@@ -915,35 +970,71 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
     for key in ["attendance", "leaveRequests", "payrollRuns"] {
         let allowed = if key == "payrollRuns" { payroll_access } else { people_access };
         result[key] = json!(if allowed {
-            present(array(&app.db, key).iter().filter(|entry| (code.is_empty() || text(entry, "facilityCode") == code) && in_window(entry, from, to)).cloned().collect(), limit)
+            present_refs(array(&app.db, key).iter().filter(|entry| (code.is_empty() || text(entry, "facilityCode") == code) && in_window(entry, from, to)).collect(), limit)
         } else {
             Vec::<Value>::new()
         });
     }
     let inpatient_access = !code.is_empty() && has_any(&["RAWAT_INAP"]);
     result["inpatientNotes"] = json!(if inpatient_access {
-        present(array(&app.db, "inpatientNotes").iter().filter(|entry| text(entry, "facilityCode") == code.as_str() && in_window(entry, from, to)).cloned().collect(), limit)
+        present_refs(array(&app.db, "inpatientNotes").iter().filter(|entry| text(entry, "facilityCode") == code.as_str() && in_window(entry, from, to)).collect(), limit)
     } else { Vec::<Value>::new() });
     result["soapRevisions"] = json!(if clinical && !code.is_empty() {
-        present(array(&app.db, "soapRevisions").iter().filter(|entry| text(entry, "facilityCode") == code.as_str() && in_window(entry, from, to)).cloned().collect(), limit)
+        present_refs(array(&app.db, "soapRevisions").iter().filter(|entry| text(entry, "facilityCode") == code.as_str() && in_window(entry, from, to)).collect(), limit)
     } else { Vec::<Value>::new() });
     if patient_access && !code.is_empty() {
-        let mut patients = result["patients"].as_array().cloned().unwrap_or_default();
-        let mut known: std::collections::HashSet<String> = patients.iter().map(|row| text(row, "id").to_owned()).collect();
-        let referenced = result["visits"].as_array().cloned().unwrap_or_default();
-        for visit in referenced {
-            let id = text(&visit, "patientId").to_owned();
-            if id.is_empty() || !known.insert(id.clone()) {
-                continue;
-            }
-            if let Some(patient) = array(&app.db, "patients").iter().find(|row| text(row, "id") == id && text(row, "facilityCode") == code.as_str()) {
-                patients.push(patient.clone());
+        let mut known: HashSet<String> = result["patients"]
+            .as_array()
+            .map(|rows| rows.iter().map(|row| text(row, "id").to_owned()).collect())
+            .unwrap_or_default();
+        let mut missing_ids: HashSet<String> = HashSet::new();
+        if let Some(visits) = result["visits"].as_array() {
+            for visit in visits {
+                let id = text(visit, "patientId");
+                if !id.is_empty() && !known.contains(id) {
+                    missing_ids.insert(id.to_owned());
+                }
             }
         }
-        result["patients"] = json!(patients);
+        if !missing_ids.is_empty() {
+            let mut extra_patients = Vec::new();
+            for row in array(&app.db, "patients") {
+                let pid = text(row, "id");
+                if missing_ids.contains(pid) && text(row, "facilityCode") == code.as_str() {
+                    if known.insert(pid.to_owned()) {
+                        extra_patients.push(row.clone());
+                        if extra_patients.len() >= missing_ids.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(patients) = result.get_mut("patients").and_then(Value::as_array_mut) {
+                patients.extend(extra_patients);
+            }
+        }
     }
-    let identity = has_any(&["SEMUA_PASIEN", "PENDAFTARAN", "RME_DOKTER", "RAWAT_INAP", "IGD_TRIASE_EWS", "LABORATORIUM", "RADIOLOGI_RIS", "KIA_IMUNISASI", "GIGI_ODONTOGRAM", "PROLANIS_PRB", "BEDAH_IBS", "MCU_SURAT_MEDIS", "APOTEK"]);
-    if !identity && has_any(&["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG"]) {
+    let has_identity_at = |fac: &str| {
+        [
+            "SEMUA_PASIEN",
+            "PENDAFTARAN",
+            "RME_DOKTER",
+            "RAWAT_INAP",
+            "IGD_TRIASE_EWS",
+            "LABORATORIUM",
+            "RADIOLOGI_RIS",
+            "KIA_IMUNISASI",
+            "GIGI_ODONTOGRAM",
+            "PROLANIS_PRB",
+            "BEDAH_IBS",
+            "MCU_SURAT_MEDIS",
+            "APOTEK",
+        ]
+        .iter()
+        .any(|module| allows(app, user, fac, module))
+    };
+    let identity = has_identity_at(code);
+    if !identity && has_any(&["KASIR_AKUNTANSI", "KLAIM_BPJS_PIUTANG", "KEUANGAN_OWNER", "NERACA_GL", "JASA_MEDIS_REMUN"]) {
         for key in ["patients", "visits"] {
             if let Some(rows) = result.get_mut(key).and_then(Value::as_array_mut) {
                 for row in rows {
@@ -959,9 +1050,12 @@ fn workspace(app: &App, context: &RequestContext, query: &str) -> Value {
                 }
             }
         }
-        if let Some(multi) = result.get_mut("multiFacilityFinance").and_then(Value::as_object_mut) {
-            if let Some(rows) = multi.get_mut("visits").and_then(Value::as_array_mut) {
-                for row in rows {
+    }
+    if let Some(multi) = result.get_mut("multiFacilityFinance").and_then(Value::as_object_mut) {
+        if let Some(rows) = multi.get_mut("visits").and_then(Value::as_array_mut) {
+            for row in rows {
+                let row_fac = text(row, "facilityCode").to_owned();
+                if !has_identity_at(&row_fac) {
                     if let Some(object) = row.as_object_mut() {
                         for field in ["nik", "address", "allergies", "chronicConditions", "bpjsNumber", "phone", "emergencyContactName", "emergencyContactPhone", "ihsNumber", "vitals", "chiefComplaint"] {
                             object.remove(field);
@@ -1003,14 +1097,16 @@ fn search_records(app: &App, context: &RequestContext, query: &str) -> Value {
         if !allowed {
             return vec![];
         }
-        let mut rows: Vec<Value> = array(&app.db, key)
+        let matched: Vec<&Value> = array(&app.db, key)
             .iter()
             .filter(|row| {
                 text(row, "facilityCode") == code.as_str()
-                    && fields.iter().any(|field| text(row, field).to_lowercase().contains(&needle))
+                    && fields
+                        .iter()
+                        .any(|field| contains_ignore_ascii_case(text(row, field), &needle))
             })
-            .cloned()
             .collect();
+        let mut rows = present_refs(matched, 30);
         if redact {
             for row in &mut rows {
                 if let Some(object) = row.as_object_mut() {
@@ -1020,7 +1116,7 @@ fn search_records(app: &App, context: &RequestContext, query: &str) -> Value {
                 }
             }
         }
-        present(rows, 30)
+        rows
     };
         let patient_fields: &[&str] = if redact {
             &["fullName", "mrNumber"]

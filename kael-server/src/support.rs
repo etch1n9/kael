@@ -171,6 +171,12 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         }
         items.push(normalized);
         if receive {
+            let old_buy_price = n(&med, "buyPrice");
+            for existing_batch in array_mut(&mut med, "batches") {
+                if existing_batch.get("unitCost").and_then(Value::as_f64).is_none() {
+                    existing_batch["unitCost"] = json!(old_buy_price);
+                }
+            }
             let batch_index = array(&med, "batches")
                 .iter()
                 .position(|row| text(row, "batchNumber").eq_ignore_ascii_case(&batch));
@@ -182,13 +188,24 @@ fn procurement(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                 if !existing_expiry.is_empty() && existing_expiry != expiry {
                     return Err(conflict("Tanggal kedaluwarsa batch ini berbeda dengan data yang sudah tercatat."));
                 }
+                let prev_cost = array(&med, "batches")[index]
+                    .get("unitCost")
+                    .and_then(Value::as_f64)
+                    .filter(|c| c.is_finite() && *c >= 0.0)
+                    .unwrap_or(old_buy_price);
+                let blended_cost = if before > 0.0 {
+                    ((before * prev_cost) + (qty * price)) / (before + qty)
+                } else {
+                    price
+                };
                 array_mut(&mut med, "batches")[index]["stock"] = json!(before + qty);
+                array_mut(&mut med, "batches")[index]["unitCost"] = json!(blended_cost);
                 if existing_expiry.is_empty() {
                     array_mut(&mut med, "batches")[index]["expiryDate"] = json!(expiry);
                 }
             } else {
                 array_mut(&mut med, "batches")
-                    .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":qty}));
+                    .push(json!({"batchNumber":batch,"expiryDate":expiry,"stock":qty,"unitCost":price}));
             }
             med["buyPrice"] = json!(price);
             stock_mutation(
@@ -339,36 +356,17 @@ fn radiology_verify(app: &mut App, ctx: &RequestContext, order_id: &str, body: &
     order["radiologistName"] = ctx.user["fullName"].clone();
     order["verifiedAt"] = json!(timestamp);
     array_mut(&mut app.db, "radiologyOrders")[index] = order.clone();
-    let visit_id = text(&order, "visitId");
-    let pending_rx = array(&app.db, "pharmacyOrders").iter().any(|rx| {
-        text(rx, "visitId") == visit_id
-            && text(rx, "facilityCode") == ctx.facility_code
-            && !matches!(text(rx, "status"), "DISERAHKAN" | "BATAL")
-    });
-    let pending_lab = array(&app.db, "labOrders").iter().any(|lab| {
-        text(lab, "visitId") == visit_id
-            && text(lab, "facilityCode") == ctx.facility_code
-            && !matches!(text(lab, "status"), "SELESAI_VERIFIKASI" | "BATAL")
-    });
-    let pending_rad = array(&app.db, "radiologyOrders").iter().any(|rad| {
-        text(rad, "visitId") == visit_id
-            && text(rad, "facilityCode") == ctx.facility_code
-            && !matches!(text(rad, "status"), "EXPERTISE_VERIFIED" | "BATAL")
-    });
-    if !pending_rx && !pending_lab && !pending_rad {
-        let invoice_settled = array(&app.db, "invoices").iter().any(|inv| {
-            text(inv, "visitId") == visit_id
-                && text(inv, "facilityCode") == ctx.facility_code
-                && matches!(text(inv, "status"), "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI")
-        });
-        let next_visit_status = if invoice_settled { "SELESAI" } else { "KASIR" };
-        for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
-            text(v, "id") == visit_id
-                && text(v, "facilityCode") == ctx.facility_code
-                && text(v, "status") == "FARMASI_LAB"
-        }) {
-            visit["status"] = json!(next_visit_status);
-            visit["updatedAt"] = json!(timestamp);
+    let visit_id = text(&order, "visitId").to_owned();
+    if let Some(next_visit_status) = crate::finance::compute_visit_post_service_status(app, &ctx.facility_code, &visit_id) {
+        if next_visit_status != "FARMASI_LAB" {
+            for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
+                text(v, "id") == visit_id
+                    && text(v, "facilityCode") == ctx.facility_code
+                    && text(v, "status") == "FARMASI_LAB"
+            }) {
+                visit["status"] = json!(next_visit_status);
+                visit["updatedAt"] = json!(timestamp);
+            }
         }
     }
     audit(
@@ -546,6 +544,24 @@ fn evidence(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     json_response(201, record)
 }
 
+fn parse_schedule_time(raw: &str) -> Option<chrono::NaiveDateTime> {
+    let trimmed = raw.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.naive_local());
+    }
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ] {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Some(dt);
+        }
+    }
+    None
+}
+
 fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     require_service(app, ctx, &["BEDAH_IBS"], &["SUB_SURGERY_IBS"])?;
     let proc_name = text(body, "procedureName").trim();
@@ -554,6 +570,11 @@ fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     if proc_name.is_empty() || sched_start.is_empty() || room_code.is_empty() {
         return Err(bad_request("Nama tindakan, kamar operasi, dan jadwal operasi wajib diisi."));
     }
+    let Some(sched_dt) = parse_schedule_time(sched_start) else {
+        return Err(bad_request(
+            "Format waktu mulai jadwal operasi tidak valid (gunakan YYYY-MM-DDTHH:MM).",
+        ));
+    };
     let req_pid = text(body, "patientId").trim();
     let req_mr = text(body, "mrNumber").trim();
     let req_name = text(body, "patientName").trim();
@@ -575,12 +596,19 @@ fn surgery(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         return Err(conflict("Nama pasien tidak sesuai dengan pasien operasi yang dipilih."));
     }
     if array(&app.db, "surgicalSchedules").iter().any(|s| {
-        text(s, "facilityCode") == ctx.facility_code
-            && text(s, "operatingRoomCode").eq_ignore_ascii_case(room_code)
-            && text(s, "scheduledStart") == sched_start
-            && text(s, "status") != "CANCELLED"
+        if text(s, "facilityCode") != ctx.facility_code
+            || !text(s, "operatingRoomCode").eq_ignore_ascii_case(room_code)
+            || text(s, "status") == "CANCELLED"
+        {
+            return false;
+        }
+        if text(s, "scheduledStart") == sched_start {
+            return true;
+        }
+        parse_schedule_time(text(s, "scheduledStart"))
+            .is_some_and(|existing_dt| (existing_dt - sched_dt).num_minutes().abs() < 60)
     }) {
-        return Err(conflict("Kamar operasi sudah terjadwal pada waktu mulai tersebut."));
+        return Err(conflict("Kamar operasi sudah terjadwal pada rentang waktu tersebut."));
     }
     let record = json!({"id":id("ibs"),"facilityCode":ctx.facility_code,"patientId":matched_patient["id"],"patientName":matched_patient["fullName"],"mrNumber":matched_patient["mrNumber"],"procedureName":proc_name,"icd9CmCode":text(body,"icd9CmCode").trim(),"operatingRoomCode":room_code,"surgeonName":text(body,"surgeonName").trim(),"anesthesiologistName":text(body,"anesthesiologistName").trim(),"scheduledStart":sched_start,"status":"SCHEDULED","whoSignInCompleted":false,"whoTimeOutCompleted":false,"whoSignOutCompleted":false,"createdAt":now()});
     array_mut(&mut app.db, "surgicalSchedules").push(record.clone());

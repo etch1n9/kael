@@ -249,7 +249,8 @@ pub fn fefo(batches: &[Value], quantity: f64) -> Result<(Vec<Value>, Vec<Value>)
         let take = measure(stock.min(remaining));
         batch["stock"] = json!(measure(stock - take));
         remaining = measure(remaining - take);
-        allocations.push(json!({"batchNumber":text(batch,"batchNumber"),"quantity":take}));
+        let unit_cost = batch.get("unitCost").and_then(Value::as_f64);
+        allocations.push(json!({"batchNumber":text(batch,"batchNumber"),"quantity":take,"unitCost":unit_cost}));
     }
     if remaining > 1e-6 {
         Err(remaining)

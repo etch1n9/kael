@@ -101,6 +101,52 @@ pub fn post_cogs(app: &mut App, ctx: &RequestContext, amount: f64, description: 
     balanced_journal(app, ctx, description, reference, "5-1400", "HPP Obat dan BMHP", "1-1400", "Persediaan Obat & BMHP", amount);
 }
 
+pub fn compute_visit_post_service_status(app: &App, facility_code: &str, visit_id: &str) -> Option<&'static str> {
+    if visit_id.is_empty() {
+        return None;
+    }
+    let orders_open = ["labOrders", "pharmacyOrders", "radiologyOrders"].iter().any(|key| {
+        array(&app.db, key).iter().any(|row| {
+            text(row, "visitId") == visit_id
+                && text(row, "facilityCode") == facility_code
+                && !matches!(
+                    text(row, "status"),
+                    "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED" | "BATAL" | ""
+                )
+        })
+    });
+    if orders_open {
+        return Some("FARMASI_LAB");
+    }
+    let has_soap = array(&app.db, "visits").iter().any(|v| {
+        text(v, "id") == visit_id
+            && text(v, "facilityCode") == facility_code
+            && !text(v, "soapId").trim().is_empty()
+    }) || array(&app.db, "soapRecords").iter().any(|s| {
+        text(s, "visitId") == visit_id && text(s, "facilityCode") == facility_code
+    });
+    let mut active_invoices = 0usize;
+    let mut unpaid_invoices = 0usize;
+    for inv in array(&app.db, "invoices") {
+        if text(inv, "visitId") == visit_id && text(inv, "facilityCode") == facility_code {
+            let st = text(inv, "status");
+            if st != "BATAL" {
+                active_invoices += 1;
+                if !matches!(st, "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI") {
+                    unpaid_invoices += 1;
+                }
+            }
+        }
+    }
+    if has_soap && active_invoices > 0 && unpaid_invoices == 0 {
+        Some("SELESAI")
+    } else if !has_soap {
+        Some("DIPERIKSA_DOKTER")
+    } else {
+        Some("KASIR")
+    }
+}
+
 pub fn append_service_charge(
     app: &mut App,
     ctx: &RequestContext,
@@ -124,7 +170,7 @@ pub fn append_service_charge(
     if let Some(index) = array(&app.db, "invoices").iter().position(|invoice| {
         text(invoice, "facilityCode") == ctx.facility_code
             && text(invoice, "patientId") == patient_id
-            && (visit_id.is_empty() || text(invoice, "visitId") == visit_id)
+            && text(invoice, "visitId") == visit_id
             && text(invoice, "status") == "BELUM_LUNAS"
     }) {
         let mut invoice = array(&app.db, "invoices")[index].clone();
@@ -393,16 +439,10 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
         );
         record_books(app, ctx, &entry);
     }
-    let visit_id = text(&invoice, "visitId");
-    if !visit_id.is_empty() {
-        let orders_open = ["labOrders", "pharmacyOrders", "radiologyOrders"].iter().any(|key| {
-            array(&app.db, key).iter().any(|row| {
-                text(row, "visitId") == visit_id
-                    && text(row, "facilityCode") == ctx.facility_code
-                    && !matches!(text(row, "status"), "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED" | "BATAL" | "")
-            })
-        });
-        if !orders_open {
+    array_mut(&mut app.db, "invoices")[index] = invoice.clone();
+    let visit_id = text(&invoice, "visitId").to_owned();
+    if let Some(next_status) = compute_visit_post_service_status(app, &ctx.facility_code, &visit_id) {
+        if next_status == "SELESAI" {
             for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
                 text(v, "id") == visit_id
                     && text(v, "facilityCode") == ctx.facility_code
@@ -413,7 +453,6 @@ fn pay(app: &mut App, ctx: &RequestContext, invoice_id: &str, body: &Value) -> A
             }
         }
     }
-    array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     audit(
         app,
         ctx,
@@ -639,6 +678,23 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     )?;
     let index = invoice_index(app, ctx, text(body, "invoiceId"))?;
     let mut invoice = array(&app.db, "invoices")[index].clone();
+    if text(&invoice, "status") == "BATAL" {
+        return Err(conflict(
+            "Tagihan klaim yang telah dibatalkan tidak dapat dicairkan.",
+        ));
+    }
+    let claim_visit_id = text(&invoice, "visitId");
+    if !claim_visit_id.is_empty()
+        && array(&app.db, "visits").iter().any(|v| {
+            text(v, "id") == claim_visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") == "BATAL"
+        })
+    {
+        return Err(conflict(
+            "Kunjungan pasien pada klaim ini telah dibatalkan; pencairan klaim dihentikan.",
+        ));
+    }
     if text(&invoice, "status") != "KLAIM_DIAJUKAN" || text(&invoice, "pricingStatus") != "COMPLETE"
     {
         return Err(conflict(
@@ -680,8 +736,13 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     let timestamp = now();
     let final_settlement = body["final"] == true;
     let settled = received >= net || (final_settlement && received > 0.0);
-    if final_settlement && received < net {
-        invoice["claimAdjustment"] = json!((net - received).round());
+    let writeoff_amount = if final_settlement && received < net {
+        (net - received).round()
+    } else {
+        0.0
+    };
+    if writeoff_amount > 0.0 {
+        invoice["claimAdjustment"] = json!(writeoff_amount);
     }
     invoice["status"] = json!(if settled { "LUNAS" } else { "KLAIM_DIAJUKAN" });
     invoice["paidAt"] = if settled {
@@ -715,6 +776,35 @@ fn reconcile(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     );
     array_mut(&mut app.db, "invoices")[index] = invoice.clone();
     record_books(app, ctx, &entry);
+    if writeoff_amount > 0.0 {
+        let adj_entry = accounting_entry(
+            app,
+            ctx,
+            "5-1900",
+            "Selisih / Penyesuaian Klaim JKN & Piutang",
+            "BEBAN",
+            "OPERASIONAL",
+            &format!(
+                "Penyesuaian selisih klaim final {} — {}",
+                text(&invoice, "invoiceNumber"),
+                text(&invoice, "patientName")
+            ),
+            writeoff_amount,
+            text(&invoice, "invoiceNumber"),
+        );
+        record_books(app, ctx, &adj_entry);
+    }
+    let rec_visit_id = text(&invoice, "visitId").to_owned();
+    if let Some("SELESAI") = compute_visit_post_service_status(app, &ctx.facility_code, &rec_visit_id) {
+        for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|v| {
+            text(v, "id") == rec_visit_id
+                && text(v, "facilityCode") == ctx.facility_code
+                && text(v, "status") != "BATAL"
+        }) {
+            visit["status"] = json!("SELESAI");
+            visit["updatedAt"] = json!(timestamp);
+        }
+    }
     audit(
         app,
         ctx,

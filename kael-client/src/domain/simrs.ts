@@ -592,6 +592,7 @@ export interface MedicationBatch {
   batchNumber: string;
   expiryDate: string; // YYYY-MM-DD
   stock: number;
+  unitCost?: number;
   depotCode?: string;
 }
 
@@ -875,6 +876,7 @@ export interface InvoiceRecord {
   bpjsCoveredAmount: number;
   claimRequestedAmount?: number;
   totalReceivedAmount?: number;
+  claimAdjustment?: number;
   claimSubmittedAt?: string;
   claimReceipts?: { amount: number; paymentReference: string; receivedAt: string; receivedBy: string }[];
   inacbgOrIdrgTariffAmount?: number;
@@ -883,7 +885,7 @@ export interface InvoiceRecord {
   grouperScheme?: 'INA_CBG_5_4' | 'IDRG_PILOT_1_0';
   patientPayableAmount: number;
   paymentMethod: 'TUNAI' | 'QRIS' | 'DEBIT_KREDIT' | 'KLAIM_BPJS' | 'PIUTANG_ASURANSI';
-  status: 'BELUM_LUNAS' | 'LUNAS' | 'KLAIM_DIAJUKAN' | 'KLAIM_DISETUJUI' | 'KLAIM_PENDING_DISPUTE' | 'KLAIM_DITOLAK';
+  status: 'BELUM_LUNAS' | 'LUNAS' | 'BATAL' | 'KLAIM_DIAJUKAN' | 'KLAIM_DISETUJUI' | 'KLAIM_PENDING_DISPUTE' | 'KLAIM_DITOLAK';
   cashierName?: string;
   paidAt?: string;
   dueDate?: string;

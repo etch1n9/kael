@@ -630,10 +630,10 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
                     continue;
                 }
                 let current = text(row, "status");
-                if key == "invoices" && matches!(current, "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI") {
+                if key == "invoices" && (current == "LUNAS" || n(row, "totalReceivedAmount") > 0.0) {
                     continue;
                 }
-                if !matches!(current, "BATAL" | "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI" | "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED") {
+                if !matches!(current, "BATAL" | "LUNAS" | "KLAIM_DISETUJUI" | "SELESAI_VERIFIKASI" | "DISERAHKAN" | "EXPERTISE_VERIFIED") {
                     row["status"] = json!("BATAL");
                 }
             }
@@ -755,7 +755,18 @@ fn bill_occupied_bed(app: &mut App, ctx: &RequestContext, bed: &Value) {
     };
     let guarantor = matched.as_ref().map(|visit| text(visit, "guarantor").to_owned()).unwrap_or_else(|| "UMUM".into());
     let settlement = matched.as_ref().map(|visit| text(visit, "guarantorSettlement").to_owned()).filter(|value| value == "BPJS").unwrap_or_else(|| "PATIENT".into());
-    let visit_id = matched.as_ref().map(|visit| text(visit, "id").to_owned()).unwrap_or_default();
+    let visit_id = matched
+        .as_ref()
+        .map(|visit| text(visit, "id").to_owned())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| {
+            let adm = text(bed, "admissionId");
+            if adm.is_empty() {
+                format!("INP-{}", text(bed, "id"))
+            } else {
+                adm.to_owned()
+            }
+        });
     let days = stay_days(&text(bed, "admittedAt")).max(1);
     crate::finance::append_service_charge(
         app,
@@ -823,16 +834,41 @@ fn bed_action(
             bed["admittedAt"] = json!(now());
             bed["attendingDoctor"] = practitioner["fullName"].clone();
             bed["diagnosis"] = json!(text(body, "diagnosis").chars().take(4000).collect::<String>());
-            let visit_id = array(&app.db, "visits")
-                .iter()
-                .rev()
-                .find(|visit| {
-                    text(visit, "facilityCode") == ctx.facility_code
-                        && text(visit, "patientId") == text(&patient, "id")
-                        && !matches!(text(visit, "status"), "SELESAI" | "BATAL")
-                })
-                .map(|visit| text(visit, "id").to_owned())
-                .unwrap_or_default();
+            let explicit_visit_id = text(body, "visitId").trim();
+            let visit_id = if !explicit_visit_id.is_empty() {
+                array(&app.db, "visits")
+                    .iter()
+                    .find(|visit| {
+                        text(visit, "facilityCode") == ctx.facility_code
+                            && text(visit, "id") == explicit_visit_id
+                            && text(visit, "patientId") == text(&patient, "id")
+                            && !matches!(text(visit, "status"), "SELESAI" | "BATAL")
+                    })
+                    .map(|visit| text(visit, "id").to_owned())
+                    .unwrap_or_default()
+            } else {
+                array(&app.db, "visits")
+                    .iter()
+                    .rev()
+                    .find(|visit| {
+                        if text(visit, "facilityCode") != ctx.facility_code
+                            || text(visit, "patientId") != text(&patient, "id")
+                            || matches!(text(visit, "status"), "SELESAI" | "BATAL")
+                        {
+                            return false;
+                        }
+                        if text(visit, "visitType") == "RAWAT_INAP" {
+                            return true;
+                        }
+                        array(&app.db, "soapRecords").iter().any(|soap| {
+                            text(soap, "visitId") == text(visit, "id")
+                                && text(soap, "facilityCode") == ctx.facility_code
+                                && text(&soap["plan"], "disposition") == "RAWAT_INAP"
+                        })
+                    })
+                    .map(|visit| text(visit, "id").to_owned())
+                    .unwrap_or_default()
+            };
             bed["visitId"] = json!(visit_id);
             bed["latestCppt"] = Value::Null;
         }
@@ -1132,39 +1168,20 @@ fn verify_lab(app: &mut App, ctx: &RequestContext, order_id: &str, body: &Value)
     order["status"] = json!("SELESAI_VERIFIKASI");
     order["verifiedBy"] = ctx.user["fullName"].clone();
     order["verifiedAt"] = json!(now());
-    let pending = array(&app.db, "pharmacyOrders").iter().any(|rx| {
-        text(rx, "visitId") == text(&order, "visitId")
-            && text(rx, "facilityCode") == ctx.facility_code
-            && !matches!(text(rx, "status"), "DISERAHKAN" | "BATAL")
-    });
-    let support_open = array(&app.db, "labOrders").iter().any(|other| {
-        text(other, "id") != text(&order, "id")
-            && text(other, "visitId") == text(&order, "visitId")
-            && text(other, "facilityCode") == ctx.facility_code
-            && !matches!(text(other, "status"), "SELESAI_VERIFIKASI" | "BATAL")
-    }) || array(&app.db, "radiologyOrders").iter().any(|other| {
-        text(other, "visitId") == text(&order, "visitId")
-            && text(other, "facilityCode") == ctx.facility_code
-            && !matches!(text(other, "status"), "EXPERTISE_VERIFIED" | "BATAL")
-    });
-    if !pending && !support_open {
-        let visit_id = text(&order, "visitId");
-        let invoice_settled = array(&app.db, "invoices").iter().any(|inv| {
-            text(inv, "visitId") == visit_id
-                && text(inv, "facilityCode") == ctx.facility_code
-                && matches!(text(inv, "status"), "LUNAS" | "KLAIM_DIAJUKAN" | "KLAIM_DISETUJUI")
-        });
-        let next_visit_status = if invoice_settled { "SELESAI" } else { "KASIR" };
-        for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|visit| {
-            text(visit, "id") == visit_id
-                && text(visit, "facilityCode") == ctx.facility_code
-                && text(visit, "status") == "FARMASI_LAB"
-        }) {
-            visit["status"] = json!(next_visit_status);
-            visit["updatedAt"] = json!(now());
+    array_mut(&mut app.db, "labOrders")[i] = order.clone();
+    let visit_id = text(&order, "visitId").to_owned();
+    if let Some(next_visit_status) = crate::finance::compute_visit_post_service_status(app, &ctx.facility_code, &visit_id) {
+        if next_visit_status != "FARMASI_LAB" {
+            for visit in array_mut(&mut app.db, "visits").iter_mut().filter(|visit| {
+                text(visit, "id") == visit_id
+                    && text(visit, "facilityCode") == ctx.facility_code
+                    && text(visit, "status") == "FARMASI_LAB"
+            }) {
+                visit["status"] = json!(next_visit_status);
+                visit["updatedAt"] = json!(now());
+            }
         }
     }
-    array_mut(&mut app.db, "labOrders")[i] = order.clone();
     audit(
         app,
         ctx,
@@ -1274,12 +1291,20 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                 conflict(message)
             }
         })?;
-    if existing.is_none() && text(&visit, "status") == "SELESAI" {
-        return Err(conflict("Kunjungan yang sudah selesai tidak dapat dibuatkan rekam medis SOAP baru."));
-    }
-    let ii = array(&app.db, "invoices").iter().position(|row| {
-        text(row, "visitId") == text(&visit, "id") && text(row, "facilityCode") == ctx.facility_code
-    });
+    let ii = array(&app.db, "invoices")
+        .iter()
+        .position(|row| {
+            text(row, "visitId") == text(&visit, "id")
+                && text(row, "facilityCode") == ctx.facility_code
+                && text(row, "status") == "BELUM_LUNAS"
+        })
+        .or_else(|| {
+            array(&app.db, "invoices").iter().position(|row| {
+                text(row, "visitId") == text(&visit, "id")
+                    && text(row, "facilityCode") == ctx.facility_code
+                    && text(row, "status") != "BATAL"
+            })
+        });
     let prior_invoice = ii.map(|i| array(&app.db, "invoices")[i].clone());
     if (text(&visit, "status") == "SELESAI"
         || prior_invoice.as_ref().is_some_and(|inv| text(inv, "status") != "BELUM_LUNAS"))
@@ -1308,20 +1333,41 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     } else {
         array_mut(&mut app.db, "soapRecords").push(record.clone());
     }
+    let prescriptions = array(&record["plan"], "prescriptions").clone();
+    let procedures = array(&record["plan"], "procedures").clone();
+    let lab_codes = array(&record["plan"], "labRequestedParams").clone();
     if text(&record, "recordStatus") == "ADDENDUM_APPENDED"
-        || text(&visit, "status") == "SELESAI"
-        || prior_invoice
-            .as_ref()
-            .map(|invoice| text(invoice, "status") != "BELUM_LUNAS")
-            .unwrap_or(false)
+        || ((text(&visit, "status") == "SELESAI"
+            || prior_invoice
+                .as_ref()
+                .map(|invoice| text(invoice, "status") != "BELUM_LUNAS")
+                .unwrap_or(false))
+            && (existing.is_some()
+                || (prescriptions.is_empty() && procedures.is_empty() && lab_codes.is_empty())))
     {
+        visit["vitals"] = vital_signs.clone();
+        visit["soapId"] = record["id"].clone();
+        visit["triageLevel"] = json!(auto_triage(&vital_signs));
+        visit["updatedAt"] = json!(timestamp);
         array_mut(&mut app.db, "visits")[vi] = visit.clone();
+        if let Some(next_status) = crate::finance::compute_visit_post_service_status(
+            app,
+            &ctx.facility_code,
+            text(&visit, "id"),
+        ) {
+            visit["status"] = json!(next_status);
+            array_mut(&mut app.db, "visits")[vi] = visit.clone();
+        }
         audit(
             app,
             ctx,
-            "RME_SOAP_AMENDMENT",
+            if existing.is_some() {
+                "RME_SOAP_AMENDMENT"
+            } else {
+                "RME_SOAP_FINALIZE"
+            },
             text(&visit, "registrationNumber"),
-            "Pengesahan koreksi/addendum rekam medis dengan riwayat perubahan tetap tersimpan.",
+            "Pengesahan rekam medis SOAP dengan riwayat perubahan tetap tersimpan.",
         );
         save(app)?;
         return json_response(
@@ -1329,18 +1375,10 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
             json!({"soapRecord":record,"visit":visit,"invoice":prior_invoice.unwrap_or(Value::Null)}),
         );
     }
-    let prescriptions = array(&record["plan"], "prescriptions").clone();
-    let procedures = array(&record["plan"], "procedures").clone();
-    let lab_codes = array(&record["plan"], "labRequestedParams").clone();
     let lab_params = parameters(&lab_codes, &body["pricing"]["labTariffs"])?;
     visit["vitals"] = vital_signs.clone();
     visit["soapId"] = record["id"].clone();
     visit["triageLevel"] = json!(auto_triage(&vital_signs));
-    visit["status"] = json!(if !prescriptions.is_empty() || !lab_params.is_empty() {
-        "FARMASI_LAB"
-    } else {
-        "KASIR"
-    });
     visit["updatedAt"] = json!(timestamp);
     let poi = array(&app.db, "pharmacyOrders").iter().position(|order| {
         text(order, "visitId") == text(&visit, "id")
@@ -1403,19 +1441,69 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         .as_ref()
         .map(|invoice| array(invoice, "items").to_vec())
         .unwrap_or_default();
+    let prior_cancelled = prior_invoice
+        .as_ref()
+        .map(|invoice| array(invoice, "cancelledComponents").to_vec())
+        .unwrap_or_default();
+    let old_procedures = existing
+        .as_ref()
+        .map(|old| array(&old["plan"], "procedures").to_vec())
+        .unwrap_or_default();
+    let mut matched_prior_indices = std::collections::HashSet::new();
     let mut quote = |key: &str,
+                     legacy_key: Option<&str>,
+                     proc_code_hint: Option<&str>,
                      category: &str,
                      description: String,
                      quantity: f64,
                      price: &Value|
      -> Result<(), ApiError> {
         handled_keys.insert(key.to_owned());
-        let prior_match = prior_items.iter().find(|item| {
-            text(item, "key") == key
-                || (category == "TINDAKAN"
-                    && text(item, "category") == "TINDAKAN"
-                    && text(item, "description") == description)
-        });
+        if price.is_null()
+            && prior_cancelled.iter().any(|c| {
+                text(c, "key") == key
+                    || legacy_key.is_some_and(|lk| text(c, "key") == lk)
+                    || (category == "TINDAKAN"
+                        && text(c, "category") == "TINDAKAN"
+                        && text(c, "description") == description)
+            })
+        {
+            return Ok(());
+        }
+        let prior_idx = prior_items
+            .iter()
+            .enumerate()
+            .find(|(idx, item)| {
+                !matched_prior_indices.contains(idx)
+                    && (text(item, "key") == key
+                        || (category == "TINDAKAN"
+                            && text(item, "category") == "TINDAKAN"
+                            && text(item, "description") == description))
+            })
+            .or_else(|| {
+                let code = proc_code_hint.filter(|c| !c.is_empty())?;
+                let prefix_str = format!("{code} - ");
+                let code_key = format!("procedure-{code}");
+                prior_items.iter().enumerate().find(|(idx, item)| {
+                    !matched_prior_indices.contains(idx)
+                        && text(item, "category") == "TINDAKAN"
+                        && (text(item, "description").starts_with(&prefix_str)
+                            || text(item, "key") == code_key)
+                })
+            })
+            .or_else(|| {
+                let lk = legacy_key?;
+                prior_items.iter().enumerate().find(|(idx, item)| {
+                    !matched_prior_indices.contains(idx)
+                        && text(item, "category") == category
+                        && text(item, "key") == lk
+                })
+            })
+            .map(|(idx, _)| idx);
+        if let Some(idx) = prior_idx {
+            matched_prior_indices.insert(idx);
+        }
+        let prior_match = prior_idx.map(|idx| &prior_items[idx]);
         if price.is_null() {
             if let Some(existing_item) = prior_match {
                 let unit_price = n(existing_item, "unitPrice").round();
@@ -1446,6 +1534,8 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     };
     quote(
         "registration",
+        None,
+        None,
         "PENDAFTARAN",
         "Pendaftaran pasien".into(),
         1.0,
@@ -1453,24 +1543,57 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     )?;
     quote(
         "consultation",
+        None,
+        None,
         "KONSULTASI",
         "Konsultasi pemeriksa".into(),
         1.0,
         &body["pricing"]["consultationFee"],
     )?;
+    let mut used_proc_keys = std::collections::HashSet::new();
+    let mut used_old_proc_indices = std::collections::HashSet::new();
     for (index, procedure) in procedures.iter().enumerate() {
         let proc_code = text(procedure, "icd9Code").trim();
         let proc_name = text(procedure, "name").trim();
-        let stable_key = if !proc_code.is_empty() {
+        let base_key = if !proc_code.is_empty() {
             format!("procedure-{proc_code}")
         } else if !proc_name.is_empty() {
             format!("procedure-{}", proc_name.to_lowercase().replace(' ', "-"))
         } else {
             format!("procedure-{index}")
         };
+        let stable_key = if used_proc_keys.insert(base_key.clone()) {
+            base_key
+        } else {
+            let mut suffix = index;
+            loop {
+                let candidate = format!("{base_key}-{suffix}");
+                if used_proc_keys.insert(candidate.clone()) {
+                    break candidate;
+                }
+                suffix += 1;
+            }
+        };
+        let old_idx = old_procedures
+            .iter()
+            .enumerate()
+            .find(|(oi, old_p)| {
+                !used_old_proc_indices.contains(oi)
+                    && ((!proc_code.is_empty() && text(old_p, "icd9Code").trim() == proc_code)
+                        || (!proc_name.is_empty() && text(old_p, "name").trim() == proc_name))
+            })
+            .map(|(oi, _)| oi);
+        if let Some(oi) = old_idx {
+            used_old_proc_indices.insert(oi);
+        }
+        let legacy_positional = old_idx
+            .map(|oi| format!("procedure-{oi}"))
+            .or_else(|| Some(format!("procedure-{index}")));
         let desc = format!("{proc_code} - {proc_name}");
         quote(
             &stable_key,
+            legacy_positional.as_deref(),
+            if proc_code.is_empty() { None } else { Some(proc_code) },
             "TINDAKAN",
             desc,
             1.0,
@@ -1482,6 +1605,8 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         let price = n(&prescription, "unitPrice");
         quote(
             &format!("rx-{}", text(&prescription, "medicationId")),
+            None,
+            None,
             "FARMASI",
             format!(
                 "{} ({} {})",
@@ -1496,6 +1621,8 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
     for parameter in lab_params {
         quote(
             &format!("lab-{}", text(&parameter, "code")),
+            None,
+            None,
             "LABORATORIUM",
             format!("Pemeriksaan Lab: {}", text(&parameter, "name")),
             1.0,
@@ -1515,7 +1642,11 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         }
     }
     let bpjs = visit_uses_bpjs(&visit);
-    let totals = invoice_totals(&items, bpjs, 0.0);
+    let prior_discount = prior_invoice
+        .as_ref()
+        .map(|inv| n(inv, "discountAmount"))
+        .unwrap_or(0.0);
+    let totals = invoice_totals(&items, bpjs, prior_discount);
     if !totals["subtotal"]
         .as_f64()
         .is_some_and(|subtotal| subtotal.is_finite())
@@ -1543,7 +1674,7 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
                 )
             )
         });
-    let mut invoice = json!({"id":prior_invoice.as_ref().map(|row|row["id"].clone()).unwrap_or_else(||json!(id("inv"))),"facilityCode":ctx.facility_code,"invoiceNumber":invoice_number,"visitId":visit["id"],"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"guarantor":visit["guarantor"],"guarantorSettlement":if bpjs {json!("BPJS")} else {json!("PATIENT")},"items":items,"unpricedItems":unpriced_items,"pricingStatus":if unpriced_items.is_empty(){"COMPLETE"}else{"PENDING"},"subtotal":totals["subtotal"],"discountAmount":totals["discountAmount"],"bpjsCoveredAmount":totals["bpjsCoveredAmount"],"patientPayableAmount":totals["patientPayableAmount"],"paymentMethod":Value::Null,"status":"BELUM_LUNAS","createdAt":prior_invoice.as_ref().map(|row|row["createdAt"].clone()).unwrap_or_else(||json!(timestamp))});
+    let mut invoice = json!({"id":prior_invoice.as_ref().map(|row|row["id"].clone()).unwrap_or_else(||json!(id("inv"))),"facilityCode":ctx.facility_code,"invoiceNumber":invoice_number,"visitId":visit["id"],"patientId":patient["id"],"patientName":patient["fullName"],"mrNumber":patient["mrNumber"],"guarantor":visit["guarantor"],"guarantorSettlement":if bpjs {json!("BPJS")} else {json!("PATIENT")},"items":items,"unpricedItems":unpriced_items,"cancelledComponents":prior_cancelled,"pricingStatus":if unpriced_items.is_empty() && !items.is_empty(){"COMPLETE"}else{"PENDING"},"subtotal":totals["subtotal"],"discountAmount":totals["discountAmount"],"bpjsCoveredAmount":totals["bpjsCoveredAmount"],"patientPayableAmount":totals["patientPayableAmount"],"paymentMethod":Value::Null,"status":"BELUM_LUNAS","createdAt":prior_invoice.as_ref().map(|row|row["createdAt"].clone()).unwrap_or_else(||json!(timestamp))});
     if existing
         .as_ref()
         .is_some_and(|old| old["plan"] == record["plan"])
@@ -1561,10 +1692,23 @@ fn soap(app: &mut App, ctx: &RequestContext, body: &Value) -> ApiResult {
         json!(0)
     };
     if let Some(i) = ii {
-        array_mut(&mut app.db, "invoices")[i] = invoice.clone();
+        if text(&array(&app.db, "invoices")[i], "status") == "BELUM_LUNAS" {
+            array_mut(&mut app.db, "invoices")[i] = invoice.clone();
+        } else {
+            invoice["id"] = json!(id("inv"));
+            array_mut(&mut app.db, "invoices").push(invoice.clone());
+        }
     } else {
         array_mut(&mut app.db, "invoices").push(invoice.clone());
     }
+    array_mut(&mut app.db, "visits")[vi] = visit.clone();
+    let computed_status = crate::finance::compute_visit_post_service_status(
+        app,
+        &ctx.facility_code,
+        text(&visit, "id"),
+    )
+    .unwrap_or("KASIR");
+    visit["status"] = json!(computed_status);
     array_mut(&mut app.db, "visits")[vi] = visit.clone();
     array_mut(&mut app.db,"bridgingLogs").push(json!({"id":id("brg-ss"),"facilityCode":ctx.facility_code,"targetSystem":"SATUSEHAT_FHIR_R4","resourceType":"Bundle (Encounter, Condition ICD-10, Observation Vitals, MedicationRequest)","referenceId":visit["id"],"patientName":patient["fullName"],"status":"QUEUED_LOCAL","externalId":"","latencyMs":0,"payloadPreview":{"resourceType":"Bundle","type":"transaction","localVisitId":visit["id"],"patientIhs":patient["ihsNumber"],"practitionerName":record["doctorName"],"icd10Primary":record["assessment"]["primaryIcd10Code"],"icd10Display":record["assessment"]["primaryIcd10Name"],"vitals":vital_signs,"prescriptionCount":array(&record["plan"],"prescriptions").len()},"timestamp":timestamp}));
     audit(

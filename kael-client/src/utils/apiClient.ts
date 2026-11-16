@@ -241,12 +241,13 @@ export const kaelApi = {
       body: JSON.stringify(payload),
     }),
 
-  switchFacility: (token: string, facilityCode: string) =>
+  switchFacility: (token: string, facilityCode: string, signal?: AbortSignal) =>
     requestJson<{ activeFacility: Facility | null; accessibleFacilities: Facility[] }>(
       '/auth/switch-facility',
       {
         method: 'POST',
         body: JSON.stringify({ facilityCode }),
+        signal,
       },
       token,
       facilityCode

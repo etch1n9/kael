@@ -1181,7 +1181,7 @@ export function computeErpCompleteFinancialAnalysis(params: {
     if (!['BELUM_LUNAS', 'KLAIM_DIAJUKAN', 'KLAIM_PENDING_DISPUTE', 'KLAIM_DISETUJUI'].includes(invoice.status)) continue;
     const amount = recordedNonnegative(getInvoiceOutstanding(invoice));
     const age = ageOf(invoice.createdAt);
-    if (amount !== null && age !== null) receivableBuckets[age <= 30 ? 0 : age <= 60 ? 1 : age <= 90 ? 2 : 3] += amount;
+    if (amount !== null && amount > 0 && age !== null) receivableBuckets[age <= 30 ? 0 : age <= 60 ? 1 : age <= 90 ? 2 : 3] += amount;
   }
   const payableBuckets = [0, 0, 0, 0];
   for (const order of params.purchaseOrders || []) {

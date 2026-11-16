@@ -275,6 +275,9 @@ export default function App() {
   }, [commandOpen, commandQuery, session]);
 
   const workspaceRequest = useRef<AbortController | null>(null);
+  const switchRequest = useRef<AbortController | null>(null);
+  const activeSessionTokenRef = useRef<string | null>(session?.token ?? null);
+  activeSessionTokenRef.current = session?.token ?? null;
   const fetchActiveWorkspace = useCallback(async (activeSession: StoredSession) => {
     workspaceRequest.current?.abort();
     const request = new AbortController();
@@ -384,24 +387,36 @@ export default function App() {
   }, [session, workspace, navigateAndExpandCategory, isNarrowLayout]);
 
   const handleLoginSuccess = (newSession: StoredSession) => {
+    switchRequest.current?.abort();
+    switchRequest.current = null;
+    activeSessionTokenRef.current = newSession.token;
     saveStoredSession(newSession);
     setSession(newSession);
     setActiveModule('DASHBOARD');
   };
 
   const handleLogout = () => {
+    switchRequest.current?.abort();
+    switchRequest.current = null;
+    activeSessionTokenRef.current = null;
     workspaceRequest.current?.abort();
     if (session) void kaelApi.logout(session.token).catch(() => {});
     saveStoredSession(null);
     setSession(null);
     setWorkspace(null);
+    setIsLoadingWorkspace(false);
   };
 
   const handleSwitchFacility = async (newFacilityCode: string) => {
     if (!session || isLoadingWorkspace || newFacilityCode === session.activeFacility?.code) return;
+    switchRequest.current?.abort();
+    const controller = new AbortController();
+    switchRequest.current = controller;
+    const expectedToken = session.token;
     setIsLoadingWorkspace(true);
     try {
-      const switched = await kaelApi.switchFacility(session.token, newFacilityCode);
+      const switched = await kaelApi.switchFacility(expectedToken, newFacilityCode, controller.signal);
+      if (controller.signal.aborted || activeSessionTokenRef.current !== expectedToken) return;
       const updatedSession: StoredSession = {
         ...session,
         activeFacility: switched.activeFacility,
@@ -414,6 +429,7 @@ export default function App() {
       setSession(updatedSession);
       setSelectedRmeVisitId(null);
     } catch (err) {
+      if (controller.signal.aborted || activeSessionTokenRef.current !== expectedToken) return;
       setWorkspaceError(
         err instanceof Error ? err.message : 'Gagal beralih fasilitas kesehatan.'
       );
