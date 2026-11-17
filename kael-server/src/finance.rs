@@ -83,6 +83,27 @@ fn has_duplicate_invoice_number(app: &App, facility_code: &str, inv_num: &str) -
             > 1
 }
 
+fn has_unmapped_legacy_journal(app: &App, facility_code: &str, inv_num: &str) -> bool {
+    !inv_num.is_empty()
+        && array(&app.db, "doubleEntryJournals").iter().any(|j| {
+            text(j, "facilityCode") == facility_code
+                && text(j, "invoiceId").is_empty()
+                && text(j, "sourceTransactionId") == inv_num
+        })
+}
+
+/// True when `inv_num` is shared by more than one invoice (ambiguous) AND there is at
+/// least one legacy double-entry journal for that number with no `invoiceId` attached.
+/// In that state we cannot safely tell which invoice a receipt/recognition journal
+/// belongs to, so any automatic reversal or finalization must be held rather than
+/// applied to only the journals that happen to carry an `invoiceId` — otherwise the
+/// unmapped journal's effect on the receivable account is silently left out of the
+/// netting and the general ledger ends up with a negative receivable balance.
+pub fn has_ambiguous_unmapped_claim_journal(app: &App, facility_code: &str, inv_num: &str) -> bool {
+    has_duplicate_invoice_number(app, facility_code, inv_num)
+        && has_unmapped_legacy_journal(app, facility_code, inv_num)
+}
+
 fn check_claim_recognition(
     app: &App,
     facility_code: &str,
@@ -1270,8 +1291,16 @@ fn resolve_cancelled_invoice(
                     "Nominal pengembalian dana tidak boleh melebihi jumlah yang telah diterima.",
                 ));
             }
-            let reference = text(body, "paymentReference").trim();
             let remaining_received = (prev_received - refund_amount).max(0.0).round();
+            if remaining_received == 0.0 {
+                let inv_num = text(&invoice, "invoiceNumber");
+                if has_ambiguous_unmapped_claim_journal(app, &ctx.facility_code, inv_num) {
+                    return Err(conflict(format!(
+                        "Nomor invoice {inv_num} digunakan oleh lebih dari satu tagihan dan memiliki jurnal lama tanpa invoiceId; petakan jurnal ke ID invoice sebelum memproses pengembalian dana penuh."
+                    )));
+                }
+            }
+            let reference = text(body, "paymentReference").trim();
             invoice["totalReceivedAmount"] = json!(remaining_received);
             if remaining_received == 0.0 {
                 invoice["status"] = json!("BATAL");
@@ -1367,15 +1396,12 @@ fn reconcile_cancelled_claims_endpoint(app: &mut App, ctx: &RequestContext) -> A
     for inv in &cancelled {
         let inv_id = text(inv, "id");
         let inv_num = text(inv, "invoiceNumber");
-        let has_unmapped_legacy = !inv_num.is_empty()
-            && has_duplicate_invoice_number(app, &ctx.facility_code, inv_num)
-            && array(&app.db, "doubleEntryJournals").iter().any(|j| {
-                text(j, "facilityCode") == ctx.facility_code
-                    && text(j, "invoiceId").is_empty()
-                    && text(j, "sourceTransactionId") == inv_num
-            });
-        if has_unmapped_legacy {
+        if has_ambiguous_unmapped_claim_journal(app, &ctx.facility_code, inv_num) {
+            // Hold: an unmapped legacy journal for this duplicated invoice number would be
+            // excluded from the netting inside reverse_open_claim_receivable, so reversing
+            // now would only undo the invoiceId-matched side and leave the ledger negative.
             ambiguous_invoices.push(json!({ "invoiceId": inv_id, "invoiceNumber": inv_num }));
+            continue;
         }
         if reverse_open_claim_receivable(app, ctx, inv, "Rekonsiliasi piutang klaim batal historis") {
             reconciled_ids.push(inv_id.to_owned());
@@ -1785,6 +1811,128 @@ mod tests {
         };
         assert_eq!(err.status, 409);
         assert_eq!(app.db["invoices"][1]["status"], json!("KLAIM_DIAJUKAN"));
+        assert_eq!(account_balance(&app, "1-1200"), 150000.0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn full_refund_holds_instead_of_going_negative_when_legacy_receipt_is_unmapped() {
+        let (mut app, ctx, root) = test_app();
+        array_mut(&mut app.db, "invoices")[0]["subtotal"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["bpjsCoveredAmount"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["items"][0]["unitPrice"] = json!(150000);
+        array_mut(&mut app.db, "invoices")[0]["items"][0]["subtotal"] = json!(150000);
+
+        // Fresh CLAIM_RECOGNIZED journal: carries invoiceId (already mapped).
+        pay(&mut app, &ctx, "inv-1", &json!({ "paymentMethod": "KLAIM_BPJS" })).unwrap();
+        assert_eq!(account_balance(&app, "1-1200"), 150000.0);
+
+        // Legacy CLAIM_RECEIPT of 30.000 imported without invoiceId (not mapped yet).
+        array_mut(&mut app.db, "doubleEntryJournals").push(json!({
+            "id": "gl-legacy-receipt",
+            "facilityCode": "FAC1",
+            "journalNumber": "GL/FAC1/20261101/0001",
+            "eventType": "CLAIM_RECEIPT",
+            "sourceTransactionId": "INV/FAC1/20261117/0001",
+            "lines": [
+                { "accountCode": "1-1100", "debit": 30000, "credit": 0 },
+                { "accountCode": "1-1200", "debit": 0, "credit": 30000 }
+            ]
+        }));
+        assert_eq!(account_balance(&app, "1-1200"), 120000.0);
+
+        // A second invoice reuses the same legacy invoice number, making it ambiguous.
+        array_mut(&mut app.db, "invoices").push(json!({
+            "id": "inv-dup",
+            "facilityCode": "FAC1",
+            "invoiceNumber": "INV/FAC1/20261117/0001",
+            "visitId": "vis-dup",
+            "patientId": "pat-1",
+            "patientName": "Pasien Uji",
+            "mrNumber": "RM-000001",
+            "guarantor": "BPJS_KESEHATAN",
+            "guarantorSettlement": "BPJS",
+            "items": [{ "id": "bli-dup", "key": "consultation", "category": "KONSULTASI", "description": "Konsultasi", "quantity": 1, "unitPrice": 90000, "subtotal": 90000 }],
+            "unpricedItems": [],
+            "pricingStatus": "COMPLETE",
+            "subtotal": 90000,
+            "discountAmount": 0,
+            "bpjsCoveredAmount": 90000,
+            "patientPayableAmount": 0,
+            "status": "BELUM_LUNAS"
+        }));
+
+        // Invoice already reflects the 30.000 received (app-tracked), still active otherwise.
+        array_mut(&mut app.db, "invoices")[0]["totalReceivedAmount"] = json!(30000);
+        array_mut(&mut app.db, "visits")[0]["status"] = json!("BATAL");
+        array_mut(&mut app.db, "invoices")[0]["cancellationResolutionStatus"] = json!("NEEDS_RESOLUTION");
+
+        let err = match resolve_cancelled_invoice(&mut app, &ctx, "inv-1", &json!({
+            "action": "REFUND",
+            "reason": "Refund penuh",
+            "paymentReference": "RF-FULL",
+            "refundAmount": 30000
+        })) {
+            Err(e) => e,
+            Ok(_) => panic!("Expected 409 conflict instead of a negative receivable"),
+        };
+
+        assert_eq!(err.status, 409);
+        assert_eq!(app.db["invoices"][0]["status"], json!("KLAIM_DIAJUKAN"));
+        assert_eq!(app.db["invoices"][0]["totalReceivedAmount"], json!(30000));
+        assert!(array(&app.db["invoices"][0], "refundReceipts").is_empty());
+        assert_eq!(account_balance(&app, "1-1200"), 120000.0);
+        assert!(!array(&app.db, "doubleEntryJournals").iter().any(|j| {
+            matches!(text(j, "eventType"), "REFUND_APPROVED" | "CLAIM_REVERSED")
+        }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_cancelled_claims_endpoint_holds_ambiguous_legacy_journal() {
+        let (mut app, ctx, root) = test_app();
+        // Historical BATAL claim of 150.000 still open in GL, with no invoiceId.
+        array_mut(&mut app.db, "invoices")[0]["status"] = json!("BATAL");
+        array_mut(&mut app.db, "doubleEntryJournals").push(json!({
+            "id": "gl-hist-ambig",
+            "facilityCode": "FAC1",
+            "journalNumber": "GL/FAC1/20261110/0001",
+            "eventType": "CLAIM_RECOGNIZED",
+            "sourceTransactionId": "INV/FAC1/20261117/0001",
+            "lines": [
+                { "accountCode": "1-1200", "debit": 150000, "credit": 0 },
+                { "accountCode": "4-1015", "debit": 0, "credit": 150000 }
+            ]
+        }));
+        // A second invoice reuses the same legacy invoice number, making it ambiguous.
+        array_mut(&mut app.db, "invoices").push(json!({
+            "id": "inv-dup",
+            "facilityCode": "FAC1",
+            "invoiceNumber": "INV/FAC1/20261117/0001",
+            "visitId": "vis-dup",
+            "patientId": "pat-1",
+            "patientName": "Pasien Uji",
+            "mrNumber": "RM-000001",
+            "guarantor": "BPJS_KESEHATAN",
+            "guarantorSettlement": "BPJS",
+            "items": [{ "id": "bli-dup", "key": "consultation", "category": "KONSULTASI", "description": "Konsultasi", "quantity": 1, "unitPrice": 90000, "subtotal": 90000 }],
+            "unpricedItems": [],
+            "pricingStatus": "COMPLETE",
+            "subtotal": 90000,
+            "discountAmount": 0,
+            "bpjsCoveredAmount": 90000,
+            "patientPayableAmount": 0,
+            "status": "BELUM_LUNAS"
+        }));
+        assert_eq!(account_balance(&app, "1-1200"), 150000.0);
+
+        let r1 = reconcile_cancelled_claims_endpoint(&mut app, &ctx).unwrap();
+        assert_eq!(r1.body.as_ref().unwrap()["reconciledCount"], json!(0));
+        assert_eq!(
+            r1.body.as_ref().unwrap()["ambiguousInvoices"][0]["invoiceId"],
+            json!("inv-1")
+        );
+        // Held: balance must stay exactly as it was, not swing negative.
         assert_eq!(account_balance(&app, "1-1200"), 150000.0);
         let _ = std::fs::remove_dir_all(&root);
     }

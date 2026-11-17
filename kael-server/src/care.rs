@@ -653,6 +653,14 @@ fn visit_status(app: &mut App, ctx: &RequestContext, visit_id: &str, body: &Valu
             }
         }
         for inv in &cancelled_invoices {
+            let inv_num = text(inv, "invoiceNumber");
+            if crate::finance::has_ambiguous_unmapped_claim_journal(app, &ctx.facility_code, inv_num) {
+                // Same legacy-mapping ambiguity guard as the refund/reconciliation paths:
+                // hold the automatic reversal so it doesn't undo only the invoiceId-matched
+                // journal and leave the receivable account negative. The invoice stays
+                // BATAL and will surface via the cancelled-claims reconciliation endpoint.
+                continue;
+            }
             crate::finance::reverse_open_claim_receivable(app, ctx, inv, "Pembatalan kunjungan");
         }
         let mut released_beds = Vec::new();
