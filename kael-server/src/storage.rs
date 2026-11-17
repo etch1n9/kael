@@ -35,26 +35,90 @@ impl Drop for Storage {
 }
 
 const SCHEMA: &str = "
-CREATE TABLE records (
-    collection TEXT NOT NULL,
-    id TEXT NOT NULL,
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS records (
+    collection TEXT NOT NULL CHECK (length(trim(collection)) > 0),
+    id TEXT NOT NULL CHECK (length(trim(id)) > 0),
     facility_code TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT '',
-    payload TEXT NOT NULL,
+    payload TEXT NOT NULL CHECK (
+        json_valid(payload)
+        AND json_type(payload) = 'object'
+        AND COALESCE(json_extract(payload, '$.facilityCode'), '') = facility_code
+    ),
     PRIMARY KEY (collection, id)
 );
-CREATE INDEX idx_records_fac ON records(collection, facility_code, created_at DESC);
-CREATE TABLE documents (
-    key TEXT PRIMARY KEY,
-    payload TEXT NOT NULL
+CREATE INDEX IF NOT EXISTS idx_records_fac ON records(collection, facility_code, created_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS documents (
+    key TEXT PRIMARY KEY CHECK (length(trim(key)) > 0),
+    payload TEXT NOT NULL CHECK (json_valid(payload) AND json_type(payload) = 'object')
 );
-CREATE TABLE sessions (
-    token TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    facility_code TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY CHECK (length(trim(token)) > 0),
+    user_id TEXT NOT NULL CHECK (length(trim(user_id)) > 0),
+    facility_code TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL CHECK (expires_at > 0)
 );
-CREATE INDEX idx_sessions_user ON sessions(user_id, expires_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, expires_at DESC);
+CREATE TABLE IF NOT EXISTS sequences (
+    key TEXT PRIMARY KEY CHECK (length(trim(key)) > 0),
+    value INTEGER NOT NULL CHECK (value >= 0)
+);
+CREATE TABLE IF NOT EXISTS tenant_facilities (
+    facility_code TEXT PRIMARY KEY CHECK (length(trim(facility_code)) > 0),
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS facility_patients (
+    facility_code TEXT NOT NULL CHECK (length(trim(facility_code)) > 0),
+    patient_id TEXT NOT NULL CHECK (length(trim(patient_id)) > 0),
+    mr_number TEXT NOT NULL DEFAULT '',
+    nik TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (facility_code, patient_id)
+);
+CREATE INDEX IF NOT EXISTS idx_facility_patients_mr ON facility_patients(facility_code, mr_number);
+CREATE TABLE IF NOT EXISTS facility_visits (
+    facility_code TEXT NOT NULL CHECK (length(trim(facility_code)) > 0),
+    visit_id TEXT NOT NULL CHECK (length(trim(visit_id)) > 0),
+    patient_id TEXT NOT NULL CHECK (length(trim(patient_id)) > 0),
+    registration_number TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (facility_code, visit_id),
+    FOREIGN KEY (facility_code, patient_id) REFERENCES facility_patients(facility_code, patient_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_facility_visits_patient ON facility_visits(facility_code, patient_id);
+CREATE TABLE IF NOT EXISTS facility_invoices (
+    facility_code TEXT NOT NULL CHECK (length(trim(facility_code)) > 0),
+    invoice_id TEXT NOT NULL CHECK (length(trim(invoice_id)) > 0),
+    visit_id TEXT NOT NULL DEFAULT '',
+    patient_id TEXT NOT NULL CHECK (length(trim(patient_id)) > 0),
+    invoice_number TEXT NOT NULL CHECK (length(trim(invoice_number)) > 0),
+    status TEXT NOT NULL DEFAULT '',
+    subtotal_rp INTEGER NOT NULL DEFAULT 0 CHECK (subtotal_rp >= 0),
+    discount_rp INTEGER NOT NULL DEFAULT 0 CHECK (discount_rp >= 0),
+    received_rp INTEGER NOT NULL DEFAULT 0 CHECK (received_rp >= 0),
+    adjustment_rp INTEGER NOT NULL DEFAULT 0 CHECK (adjustment_rp >= 0),
+    is_legacy_duplicate INTEGER NOT NULL DEFAULT 0 CHECK (is_legacy_duplicate IN (0, 1)),
+    PRIMARY KEY (facility_code, invoice_id),
+    FOREIGN KEY (facility_code, patient_id) REFERENCES facility_patients(facility_code, patient_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_facility_invoices_patient ON facility_invoices(facility_code, patient_id);
+CREATE INDEX IF NOT EXISTS idx_facility_invoices_visit ON facility_invoices(facility_code, visit_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_facility_invoices_unique_num ON facility_invoices(facility_code, invoice_number) WHERE is_legacy_duplicate = 0;
+CREATE TABLE IF NOT EXISTS ledger_journal_headers (
+    facility_code TEXT NOT NULL CHECK (length(trim(facility_code)) > 0),
+    journal_id TEXT NOT NULL CHECK (length(trim(journal_id)) > 0),
+    journal_number TEXT NOT NULL DEFAULT '',
+    event_type TEXT NOT NULL DEFAULT '',
+    source_ref TEXT NOT NULL DEFAULT '',
+    invoice_id TEXT NOT NULL DEFAULT '',
+    total_debit_rp INTEGER NOT NULL DEFAULT 0 CHECK (total_debit_rp >= 0),
+    total_credit_rp INTEGER NOT NULL DEFAULT 0 CHECK (total_credit_rp >= 0),
+    CHECK (total_debit_rp = total_credit_rp),
+    PRIMARY KEY (facility_code, journal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_journal_invoice ON ledger_journal_headers(facility_code, invoice_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_journal_source ON ledger_journal_headers(facility_code, source_ref);
 PRAGMA user_version = 2;
 ";
 
@@ -95,7 +159,13 @@ impl Storage {
                 let _ = fs::remove_file(&lock_path);
                 return Err(error);
             }
-        } else if version != 2 {
+        } else if version == 2 {
+            if let Err(error) = connection.execute_batch(SCHEMA) {
+                drop(lock_file);
+                let _ = fs::remove_file(&lock_path);
+                return Err(error.to_string());
+            }
+        } else {
             drop(lock_file);
             let _ = fs::remove_file(&lock_path);
             return Err("Versi schema database KAEL tidak didukung. Kosongkan database lalu jalankan setup.".into());
@@ -109,6 +179,11 @@ impl Storage {
                 return Err(error);
             }
         };
+        if let Ok(tx) = connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+            if sync_relational_catalog(&tx, &db, None).is_ok() {
+                let _ = tx.commit();
+            }
+        }
         Ok((
             Self {
                 connection,
@@ -584,28 +659,7 @@ fn migrate_v1(connection: &mut Connection, path: &Path) -> Result<(), String> {
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     transaction
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS records (
-                collection TEXT NOT NULL,
-                id TEXT NOT NULL,
-                facility_code TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT '',
-                payload TEXT NOT NULL,
-                PRIMARY KEY (collection, id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_records_fac ON records(collection, facility_code, created_at DESC);
-            CREATE TABLE IF NOT EXISTS documents (
-                key TEXT PRIMARY KEY,
-                payload TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS sessions (
-                token TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                facility_code TEXT NOT NULL,
-                expires_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, expires_at DESC);",
-        )
+        .execute_batch(SCHEMA)
         .map_err(|error| error.to_string())?;
     write_database(&transaction, &db, &HashMap::new())?;
     transaction
@@ -618,6 +672,7 @@ fn configure(connection: &Connection) -> Result<(), String> {
     connection.busy_timeout(Duration::from_secs(5)).map_err(|error| error.to_string())?;
     connection.pragma_update(None, "journal_mode", "WAL").map_err(|error| error.to_string())?;
     connection.pragma_update(None, "synchronous", "NORMAL").map_err(|error| error.to_string())?;
+    connection.pragma_update(None, "foreign_keys", "ON").map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -784,7 +839,237 @@ fn write_database_delta(
         }
     }
     updates.insert("@".to_owned(), CollectionUpdate::Replace(doc_map));
+    sync_relational_catalog(transaction, db, dirty_collections)?;
     Ok(updates)
+}
+
+fn int_rp(row: &Value, key: &str) -> i64 {
+    row.get(key)
+        .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| n.round() as i64)
+        .unwrap_or(0)
+}
+
+fn sync_relational_catalog(
+    transaction: &Transaction,
+    db: &Value,
+    dirty: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    let should_sync = |col: &str| dirty.is_none_or(|d| d.contains(col));
+
+    if should_sync("facilities") {
+        if let Some(rows) = db.get("facilities").and_then(Value::as_array) {
+            for row in rows {
+                let code = text_of(row, "code");
+                if code.trim().is_empty() {
+                    continue;
+                }
+                let name = text_of(row, "name");
+                let active = if row.get("active").and_then(Value::as_bool).unwrap_or(true) { 1i64 } else { 0i64 };
+                transaction
+                    .execute(
+                        "INSERT INTO tenant_facilities (facility_code, name, active) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(facility_code) DO UPDATE SET name = excluded.name, active = excluded.active",
+                        params![code, name, active],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    let mut patient_facility_owner: HashMap<String, String> = HashMap::new();
+    if let Some(rows) = db.get("patients").and_then(Value::as_array) {
+        for row in rows {
+            let pid = text_of(row, "id");
+            let fac = text_of(row, "facilityCode");
+            if !pid.trim().is_empty() && !fac.trim().is_empty() {
+                patient_facility_owner.insert(pid, fac);
+            }
+        }
+    }
+
+    if should_sync("patients") || should_sync("visits") || should_sync("invoices") {
+        if let Some(rows) = db.get("patients").and_then(Value::as_array) {
+            let mut active_patients: HashSet<(String, String)> = HashSet::new();
+            for row in rows {
+                let pid = text_of(row, "id");
+                let fac = text_of(row, "facilityCode");
+                if pid.trim().is_empty() || fac.trim().is_empty() {
+                    continue;
+                }
+                active_patients.insert((fac.clone(), pid.clone()));
+                transaction
+                    .execute(
+                        "INSERT INTO facility_patients (facility_code, patient_id, mr_number, nik) VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(facility_code, patient_id) DO UPDATE SET mr_number = excluded.mr_number, nik = excluded.nik",
+                        params![fac, pid, text_of(row, "mrNumber"), text_of(row, "nik")],
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            if should_sync("patients") {
+                let mut existing_stmt = transaction
+                    .prepare("SELECT facility_code, patient_id FROM facility_patients")
+                    .map_err(|e| e.to_string())?;
+                let existing_rows = existing_stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                    .map_err(|e| e.to_string())?;
+                let mut to_remove = Vec::new();
+                for item in existing_rows {
+                    let pair = item.map_err(|e| e.to_string())?;
+                    if !active_patients.contains(&pair) {
+                        to_remove.push(pair);
+                    }
+                }
+                drop(existing_stmt);
+                for (fac, pid) in to_remove {
+                    transaction
+                        .execute(
+                            "DELETE FROM facility_patients WHERE facility_code = ?1 AND patient_id = ?2",
+                            params![fac, pid],
+                        )
+                        .map_err(|e| format!("Pasien masih memiliki riwayat kunjungan/tagihan (ON DELETE RESTRICT): {e}"))?;
+                }
+            }
+        }
+    }
+
+    if should_sync("visits") {
+        if let Some(rows) = db.get("visits").and_then(Value::as_array) {
+            let mut seen_visits = HashSet::new();
+            for row in rows {
+                let vid = text_of(row, "id");
+                let fac = text_of(row, "facilityCode");
+                let pid = text_of(row, "patientId");
+                if vid.trim().is_empty() || fac.trim().is_empty() || pid.trim().is_empty() {
+                    continue;
+                }
+                seen_visits.insert((fac.clone(), vid.clone()));
+                if !patient_facility_owner.contains_key(&pid) {
+                    transaction
+                        .execute(
+                            "INSERT OR IGNORE INTO facility_patients (facility_code, patient_id, mr_number, nik) VALUES (?1, ?2, ?3, '')",
+                            params![fac, pid, text_of(row, "mrNumber")],
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO facility_visits (facility_code, visit_id, patient_id, registration_number, status) VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(facility_code, visit_id) DO UPDATE SET patient_id = excluded.patient_id, registration_number = excluded.registration_number, status = excluded.status",
+                        params![fac, vid, pid, text_of(row, "registrationNumber"), text_of(row, "status")],
+                    )
+                    .map_err(|e| format!("Pelanggaran integritas relasi kunjungan/pasien lintas fasilitas: {e}"))?;
+            }
+        }
+    }
+
+    if should_sync("invoices") {
+        if let Some(rows) = db.get("invoices").and_then(Value::as_array) {
+            let mut num_counts: HashMap<(String, String), usize> = HashMap::new();
+            for row in rows {
+                let fac = text_of(row, "facilityCode");
+                let num = text_of(row, "invoiceNumber");
+                if !fac.trim().is_empty() && !num.trim().is_empty() {
+                    *num_counts.entry((fac, num)).or_default() += 1;
+                }
+            }
+            for row in rows {
+                let iid = text_of(row, "id");
+                let fac = text_of(row, "facilityCode");
+                let pid = text_of(row, "patientId");
+                let num = text_of(row, "invoiceNumber");
+                if iid.trim().is_empty() || fac.trim().is_empty() || pid.trim().is_empty() || num.trim().is_empty() {
+                    continue;
+                }
+                if !patient_facility_owner.contains_key(&pid) {
+                    transaction
+                        .execute(
+                            "INSERT OR IGNORE INTO facility_patients (facility_code, patient_id, mr_number, nik) VALUES (?1, ?2, ?3, '')",
+                            params![fac, pid, text_of(row, "mrNumber")],
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                let is_dup = if num_counts.get(&(fac.clone(), num.clone())).copied().unwrap_or(0) > 1 { 1i64 } else { 0i64 };
+                if is_dup == 1 {
+                    let _ = transaction.execute(
+                        "UPDATE facility_invoices SET is_legacy_duplicate = 1 WHERE facility_code = ?1 AND invoice_number = ?2",
+                        params![fac, num],
+                    );
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO facility_invoices (facility_code, invoice_id, visit_id, patient_id, invoice_number, status, subtotal_rp, discount_rp, received_rp, adjustment_rp, is_legacy_duplicate)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                         ON CONFLICT(facility_code, invoice_id) DO UPDATE SET
+                             visit_id = excluded.visit_id,
+                             patient_id = excluded.patient_id,
+                             invoice_number = excluded.invoice_number,
+                             status = excluded.status,
+                             subtotal_rp = excluded.subtotal_rp,
+                             discount_rp = excluded.discount_rp,
+                             received_rp = excluded.received_rp,
+                             adjustment_rp = excluded.adjustment_rp,
+                             is_legacy_duplicate = excluded.is_legacy_duplicate",
+                        params![
+                            fac,
+                            iid,
+                            text_of(row, "visitId"),
+                            pid,
+                            num,
+                            text_of(row, "status"),
+                            int_rp(row, "subtotal"),
+                            int_rp(row, "discountAmount"),
+                            int_rp(row, "totalReceivedAmount"),
+                            int_rp(row, "claimAdjustment"),
+                            is_dup
+                        ],
+                    )
+                    .map_err(|e| format!("Pelanggaran integritas relasi tagihan/pasien: {e}"))?;
+            }
+        }
+    }
+
+    if should_sync("doubleEntryJournals") {
+        if let Some(rows) = db.get("doubleEntryJournals").and_then(Value::as_array) {
+            for row in rows {
+                let jid = text_of(row, "id");
+                let fac = text_of(row, "facilityCode");
+                if jid.trim().is_empty() || fac.trim().is_empty() {
+                    continue;
+                }
+                let (debit_rp, credit_rp) = if let Some(lines) = row.get("lines").and_then(Value::as_array) {
+                    let d: i64 = lines.iter().map(|l| int_rp(l, "debit")).sum();
+                    let c: i64 = lines.iter().map(|l| int_rp(l, "credit")).sum();
+                    (d, c)
+                } else {
+                    (int_rp(row, "totalDebit"), int_rp(row, "totalCredit"))
+                };
+                transaction
+                    .execute(
+                        "INSERT INTO ledger_journal_headers (facility_code, journal_id, journal_number, event_type, source_ref, invoice_id, total_debit_rp, total_credit_rp)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(facility_code, journal_id) DO UPDATE SET
+                             total_debit_rp = excluded.total_debit_rp,
+                             total_credit_rp = excluded.total_credit_rp,
+                             invoice_id = excluded.invoice_id",
+                        params![
+                            fac,
+                            jid,
+                            text_of(row, "journalNumber"),
+                            text_of(row, "eventType"),
+                            text_of(row, "sourceTransactionId"),
+                            text_of(row, "invoiceId"),
+                            debit_rp,
+                            credit_rp
+                        ],
+                    )
+                    .map_err(|e| format!("Pelanggaran keseimbangan buku besar (Debit != Kredit): {e}"))?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn record_id(row: &Value) -> String {
@@ -918,6 +1203,71 @@ mod tests {
             let mode = fs::metadata(&fresh_target).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relational_constraints_reject_cross_tenant_fk_unbalanced_journal_and_duplicate_invoice() {
+        let root = std::env::temp_dir().join(format!("kael-rel-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("rel.sqlite");
+        let mut db = sample_db();
+        db["facilities"] = json!([
+            { "code": "FAC1", "name": "Fasilitas 1", "active": true },
+            { "code": "FAC2", "name": "Fasilitas 2", "active": true }
+        ]);
+        db["patients"] = json!([
+            { "id": "pat-1", "facilityCode": "FAC1", "mrNumber": "RM-001", "nik": "1234567890123456" }
+        ]);
+        Storage::create(&db_path, &db).unwrap();
+        let (mut store, mut loaded_db) = Storage::load(&db_path).unwrap();
+
+        // 1. Cross-tenant visit (FAC2 visit pointing to FAC1 patient pat-1) MUST be rejected by composite FK!
+        loaded_db["visits"] = json!([
+            { "id": "vis-cross", "facilityCode": "FAC2", "patientId": "pat-1", "registrationNumber": "REG-1", "status": "MENUNGGU" }
+        ]);
+        assert!(store.save(&loaded_db).is_err());
+
+        // 2. Unbalanced double-entry journal (Debit 50.000 != Credit 40.000) MUST be rejected by CHECK constraint!
+        loaded_db["visits"] = json!([]);
+        loaded_db["doubleEntryJournals"] = json!([
+            {
+                "id": "gl-unbal",
+                "facilityCode": "FAC1",
+                "journalNumber": "GL/FAC1/20261117/0001",
+                "eventType": "TEST",
+                "lines": [
+                    { "accountCode": "1-1100", "debit": 50000, "credit": 0 },
+                    { "accountCode": "4-1000", "debit": 0, "credit": 40000 }
+                ]
+            }
+        ]);
+        assert!(store.save(&loaded_db).is_err());
+
+        // 3. Direct SQL insert with mismatched payload $.facilityCode vs facility_code column MUST be rejected!
+        let bad_tenant_row = store.connection.execute(
+            "INSERT INTO records (collection, id, facility_code, created_at, payload) VALUES ('patients', 'pat-bad', 'FAC2', '', '{\"id\":\"pat-bad\",\"facilityCode\":\"FAC1\"}')",
+            [],
+        );
+        assert!(bad_tenant_row.is_err());
+
+        // 4. Direct SQL insert of duplicate non-legacy invoice_number in same facility MUST be rejected by partial unique index!
+        store.connection.execute(
+            "INSERT INTO facility_invoices (facility_code, invoice_id, patient_id, invoice_number, status, is_legacy_duplicate) VALUES ('FAC1', 'inv-a', 'pat-1', 'INV/FAC1/0001', 'BELUM_LUNAS', 0)",
+            [],
+        ).unwrap();
+        let dup_inv = store.connection.execute(
+            "INSERT INTO facility_invoices (facility_code, invoice_id, patient_id, invoice_number, status, is_legacy_duplicate) VALUES ('FAC1', 'inv-b', 'pat-1', 'INV/FAC1/0001', 'BELUM_LUNAS', 0)",
+            [],
+        );
+        assert!(dup_inv.is_err());
+
+        // 5. Deleting a patient that is still referenced by facility_invoices MUST be rejected by ON DELETE RESTRICT!
+        loaded_db["doubleEntryJournals"] = json!([]);
+        loaded_db["patients"] = json!([]);
+        assert!(store.save(&loaded_db).is_err());
+
+        drop(store);
         let _ = fs::remove_dir_all(&root);
     }
 }
